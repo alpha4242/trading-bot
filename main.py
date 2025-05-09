@@ -11,7 +11,7 @@ API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
 symbol = 'PNUTUSDT'
-timeframe = '5m'
+timeframe = '1m'
 ema_short_period = 9
 ema_long_period = 21
 quantity = 6
