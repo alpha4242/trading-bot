@@ -14,7 +14,7 @@ symbol = 'PNUTUSDT'
 timeframe = '1m'
 ema_short_period = 9
 ema_long_period = 21
-quantity = 6
+quantity = 5
 leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
@@ -75,16 +75,6 @@ def calculate_atr(df, period=14):
     df['L-PC'] = abs(df['low'] - df['close'].shift(1))
     tr = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
     df['atr'] = tr.rolling(window=period).mean()
-    return df
-
-def calculate_adx(df, period=14):
-    df['adx'] = ta.trend.ADXIndicator(
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        window=period,
-        fillna=False
-    ).adx()
     return df
 
 def get_ema_signal(df):
@@ -231,7 +221,6 @@ def run_bot():
         df = calculate_ema(df, ema_short_period, ema_long_period)
         df = calculate_rsi(df)
         df = calculate_atr(df)
-        df = calculate_adx(df)
 
         signal = get_ema_signal(df)
         if not signal:
@@ -247,10 +236,6 @@ def run_bot():
             elif signal == 'sell' and price > ema_50:
                 print("Skipping short because market is bullish (price > EMA50)")
                 return
-
-        if df['adx'].iloc[-1] < 20:
-            print(f"Weak trend (ADX: {df['adx'].iloc[-1]:.2f}) - skipping.")
-            return
 
         average_price = df['close'].iloc[-14:].mean()
         dynamic_atr_threshold = average_price * 0.001
