@@ -11,9 +11,9 @@ API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
 symbol = 'PNUTUSDT'
-timeframe = '1m'
+timeframe = '5m'
 ema_short_period = 5
-ema_long_period = 10
+ema_long_period = 18
 quantity = 6
 leverage = 10
 stoploss_lookback = 4
