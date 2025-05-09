@@ -4,12 +4,11 @@ import time
 import datetime
 import threading
 import ta
+import os
 
 # ====== CONFIGURATION ======
-import os
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
-
 
 symbol = 'PNUTUSDT'
 timeframe = '1m'
@@ -19,7 +18,7 @@ quantity = 15
 leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
-enable_ema50_filter = True  # Toggle directional filter on/off
+enable_ema50_filter = True
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -78,16 +77,6 @@ def calculate_atr(df, period=14):
     df['atr'] = tr.rolling(window=period).mean()
     return df
 
-def calculate_adx(df, period=14):
-    df['adx'] = ta.trend.ADXIndicator(
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        window=period,
-        fillna=False
-    ).adx()
-    return df
-
 def get_ema_signal(df):
     ema_short_prev2 = df['ema_short'].iloc[-3]
     ema_long_prev2 = df['ema_long'].iloc[-3]
@@ -106,14 +95,10 @@ def monitor_position(position_type):
 
     min_hold_time = 60
     check_interval = 15
-    trailing_buffer = 0.04
 
     entry_time = time.time()
     print(f"[MONITOR] Started monitoring {position_type.upper()} position...")
     time.sleep(min_hold_time)
-
-    entry_df = fetch_ohlcv(symbol, timeframe)
-    entry_price = entry_df['close'].iloc[-1]
 
     while True:
         df = fetch_ohlcv(symbol, timeframe)
@@ -122,10 +107,8 @@ def monitor_position(position_type):
         rsi = df['rsi'].iloc[-1]
         rsi_sma = df['rsi_sma'].iloc[-1]
         diff = abs(rsi - rsi_sma)
-        current_price = df['close'].iloc[-1]
-        elapsed = time.time() - entry_time
 
-        print(f"[MONITOR] Type: {position_type.upper()}, Time Held: {elapsed:.1f}s, RSI: {rsi:.2f}, SMA: {rsi_sma:.2f}, Diff: {diff:.2f}, Price: {current_price:.5f}")
+        print(f"[MONITOR] Type: {position_type.upper()}, RSI: {rsi:.2f}, SMA: {rsi_sma:.2f}, Diff: {diff:.2f}")
 
         if position_type == 'buy' and rsi < rsi_sma and diff >= rsi_diff_threshold:
             print("[EXIT] RSI exit condition met for BUY")
@@ -134,17 +117,6 @@ def monitor_position(position_type):
             break
         elif position_type == 'sell' and rsi > rsi_sma and diff >= rsi_diff_threshold:
             print("[EXIT] RSI exit condition met for SELL")
-            close_position(2)
-            is_short_open = False
-            break
-
-        if position_type == 'buy' and current_price < entry_price * (1 - trailing_buffer):
-            print("[EXIT] Trailing stop hit for BUY")
-            close_position(1)
-            is_long_open = False
-            break
-        elif position_type == 'sell' and current_price > entry_price * (1 + trailing_buffer):
-            print("[EXIT] Trailing stop hit for SELL")
             close_position(2)
             is_short_open = False
             break
@@ -199,8 +171,6 @@ def run_bot():
         df = calculate_ema(df, ema_short_period, ema_long_period)
         df = calculate_rsi(df)
         df = calculate_atr(df)
-        df = calculate_adx(df)
-        print(f"Latest ADX: {df['adx'].iloc[-1]:.2f}")
 
         average_price = df['close'].iloc[-14:].mean()
         dynamic_atr_threshold = average_price * 0.001
@@ -210,7 +180,6 @@ def run_bot():
             print("ANALYSING THE MARKET")
             return
 
-        # Directional logic based on EMA 50
         if enable_ema50_filter:
             price = df['close'].iloc[-1]
             ema_50 = df['ema_50'].iloc[-1]
@@ -221,10 +190,6 @@ def run_bot():
             elif signal == 'sell' and price > ema_50:
                 print("Skipping short because market is bullish (price > EMA50)")
                 return
-
-        if df['adx'].iloc[-1] < 20:
-            print(f"Weak trend (ADX: {df['adx'].iloc[-1]:.2f}) - skipping.")
-            return
 
         if df['atr'].iloc[-1] < dynamic_atr_threshold:
             print(f"Low ATR ({df['atr'].iloc[-1]:.6f}) below threshold ({dynamic_atr_threshold:.6f}) - skipping.")
