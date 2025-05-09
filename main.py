@@ -157,26 +157,56 @@ def place_order(signal, df):
 
     if signal == 'buy' and not is_long_open:
         sl_price = recent_candles['low'].min()
-        params = {
+        risk = current_price - sl_price
+        tp_price = current_price + 3 * risk
+
+        qty_80 = round(quantity * 0.8, 3)
+        qty_20 = quantity - qty_80
+
+        params_80 = {
+            'positionIdx': 1,
+            'takeProfit': round(tp_price, 4),
+            'stopLoss': round(sl_price, 4),
+            'tpTriggerBy': 'LastPrice',
+            'slTriggerBy': 'LastPrice'
+        }
+        params_20 = {
             'positionIdx': 1,
             'stopLoss': round(sl_price, 4),
             'slTriggerBy': 'LastPrice'
         }
-        order = exchange.create_market_buy_order(symbol, quantity, params)
+
+        exchange.create_market_buy_order(symbol, qty_80, params_80)
+        exchange.create_market_buy_order(symbol, qty_20, params_20)
         is_long_open = True
-        print(f"Executed BUY order: {order['id']}")
+        print(f"Executed BUY order: 80% at TP, 20% floating")
         threading.Thread(target=monitor_position, args=('buy',)).start()
 
     elif signal == 'sell' and not is_short_open:
         sl_price = recent_candles['high'].max()
-        params = {
+        risk = sl_price - current_price
+        tp_price = current_price - 3 * risk
+
+        qty_80 = round(quantity * 0.8, 3)
+        qty_20 = quantity - qty_80
+
+        params_80 = {
+            'positionIdx': 2,
+            'takeProfit': round(tp_price, 4),
+            'stopLoss': round(sl_price, 4),
+            'tpTriggerBy': 'LastPrice',
+            'slTriggerBy': 'LastPrice'
+        }
+        params_20 = {
             'positionIdx': 2,
             'stopLoss': round(sl_price, 4),
             'slTriggerBy': 'LastPrice'
         }
-        order = exchange.create_market_sell_order(symbol, quantity, params)
+
+        exchange.create_market_sell_order(symbol, qty_80, params_80)
+        exchange.create_market_sell_order(symbol, qty_20, params_20)
         is_short_open = True
-        print(f"Executed SELL order: {order['id']}")
+        print(f"Executed SELL order: 80% at TP, 20% floating")
         threading.Thread(target=monitor_position, args=('sell',)).start()
 
 def run_bot():
