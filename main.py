@@ -106,7 +106,7 @@ def monitor_position(position_type):
 
     min_hold_time = 60
     check_interval = 15
-    trailing_buffer = 0.0015
+    trailing_buffer = 0.004
 
     entry_time = time.time()
     print(f"[MONITOR] Started monitoring {position_type.upper()} position...")
