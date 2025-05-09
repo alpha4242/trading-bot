@@ -18,7 +18,7 @@ quantity = 6
 leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
-enable_ema50_filter = True
+enable_ema50_filter = False
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
