@@ -14,11 +14,12 @@ symbol = 'PNUTUSDT'
 timeframe = '1m'
 ema_short_period = 5
 ema_long_period = 18
-quantity = 6
+quantity = 15
 leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
-enable_ema50_filter = False
+enable_ema50_filter = False  # Optional directional filter
+enable_rsi_exit = False      # Optional RSI-based exit
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -33,7 +34,6 @@ exchange = ccxt.bybit({
 })
 
 exchange.load_markets()
-
 is_long_open = False
 is_short_open = False
 
@@ -77,6 +77,16 @@ def calculate_atr(df, period=14):
     df['atr'] = tr.rolling(window=period).mean()
     return df
 
+def calculate_adx(df, period=14):
+    df['adx'] = ta.trend.ADXIndicator(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=period,
+        fillna=False
+    ).adx()
+    return df
+
 def get_ema_signal(df):
     ema_short_prev2 = df['ema_short'].iloc[-3]
     ema_long_prev2 = df['ema_long'].iloc[-3]
@@ -91,37 +101,49 @@ def get_ema_signal(df):
 
 def monitor_position(position_type):
     global is_long_open, is_short_open
-    positionIdx = 1 if position_type == 'buy' else 2
 
-    min_hold_time = 60
-    check_interval = 15
-
-    entry_time = time.time()
     print(f"[MONITOR] Started monitoring {position_type.upper()} position...")
-    time.sleep(min_hold_time)
+    entry_df = fetch_ohlcv(symbol, timeframe)
+    entry_price = entry_df['close'].iloc[-1]
 
     while True:
+        time.sleep(15)
         df = fetch_ohlcv(symbol, timeframe)
+        df = calculate_ema(df, ema_short_period, ema_long_period)
         df = calculate_rsi(df)
 
-        rsi = df['rsi'].iloc[-1]
-        rsi_sma = df['rsi_sma'].iloc[-1]
-        diff = abs(rsi - rsi_sma)
+        if enable_rsi_exit:
+            rsi = df['rsi'].iloc[-1]
+            rsi_sma = df['rsi_sma'].iloc[-1]
+            diff = abs(rsi - rsi_sma)
 
-        print(f"[MONITOR] Type: {position_type.upper()}, RSI: {rsi:.2f}, SMA: {rsi_sma:.2f}, Diff: {diff:.2f}")
+            if position_type == 'buy' and rsi < rsi_sma and diff >= rsi_diff_threshold:
+                print("[EXIT] RSI exit condition met for BUY")
+                close_position(1)
+                is_long_open = False
+                return
+            elif position_type == 'sell' and rsi > rsi_sma and diff >= rsi_diff_threshold:
+                print("[EXIT] RSI exit condition met for SELL")
+                close_position(2)
+                is_short_open = False
+                return
 
-        if position_type == 'buy' and rsi < rsi_sma and diff >= rsi_diff_threshold:
-            print("[EXIT] RSI exit condition met for BUY")
+        new_signal = get_ema_signal(df)
+        if position_type == 'buy' and new_signal == 'sell':
+            print("[REVERSE] SELL signal detected during BUY position. Reversing...")
             close_position(1)
             is_long_open = False
-            break
-        elif position_type == 'sell' and rsi > rsi_sma and diff >= rsi_diff_threshold:
-            print("[EXIT] RSI exit condition met for SELL")
+            if not enable_ema50_filter or df['close'].iloc[-1] < df['ema_50'].iloc[-1]:
+                place_order('sell', df)
+            return
+
+        elif position_type == 'sell' and new_signal == 'buy':
+            print("[REVERSE] BUY signal detected during SELL position. Reversing...")
             close_position(2)
             is_short_open = False
-            break
-
-        time.sleep(check_interval)
+            if not enable_ema50_filter or df['close'].iloc[-1] > df['ema_50'].iloc[-1]:
+                place_order('buy', df)
+            return
 
 def close_position(positionIdx):
     side = 'sell' if positionIdx == 1 else 'buy'
@@ -135,13 +157,10 @@ def place_order(signal, df):
 
     if signal == 'buy' and not is_long_open:
         sl_price = recent_candles['low'].min()
-        tp_price = current_price + (current_price - sl_price) * 3
         params = {
             'positionIdx': 1,
             'stopLoss': round(sl_price, 4),
-            'takeProfit': round(tp_price, 4),
-            'slTriggerBy': 'LastPrice',
-            'tpTriggerBy': 'LastPrice'
+            'slTriggerBy': 'LastPrice'
         }
         order = exchange.create_market_buy_order(symbol, quantity, params)
         is_long_open = True
@@ -150,13 +169,10 @@ def place_order(signal, df):
 
     elif signal == 'sell' and not is_short_open:
         sl_price = recent_candles['high'].max()
-        tp_price = current_price - (sl_price - current_price) * 3
         params = {
             'positionIdx': 2,
             'stopLoss': round(sl_price, 4),
-            'takeProfit': round(tp_price, 4),
-            'slTriggerBy': 'LastPrice',
-            'tpTriggerBy': 'LastPrice'
+            'slTriggerBy': 'LastPrice'
         }
         order = exchange.create_market_sell_order(symbol, quantity, params)
         is_short_open = True
@@ -171,9 +187,7 @@ def run_bot():
         df = calculate_ema(df, ema_short_period, ema_long_period)
         df = calculate_rsi(df)
         df = calculate_atr(df)
-
-        average_price = df['close'].iloc[-14:].mean()
-        dynamic_atr_threshold = average_price * 0.001
+        df = calculate_adx(df)
 
         signal = get_ema_signal(df)
         if not signal:
@@ -183,7 +197,6 @@ def run_bot():
         if enable_ema50_filter:
             price = df['close'].iloc[-1]
             ema_50 = df['ema_50'].iloc[-1]
-
             if signal == 'buy' and price < ema_50:
                 print("Skipping long because market is bearish (price < EMA50)")
                 return
@@ -191,6 +204,12 @@ def run_bot():
                 print("Skipping short because market is bullish (price > EMA50)")
                 return
 
+        if df['adx'].iloc[-1] < 20:
+            print(f"Weak trend (ADX: {df['adx'].iloc[-1]:.2f}) - skipping.")
+            return
+
+        average_price = df['close'].iloc[-14:].mean()
+        dynamic_atr_threshold = average_price * 0.001
         if df['atr'].iloc[-1] < dynamic_atr_threshold:
             print(f"Low ATR ({df['atr'].iloc[-1]:.6f}) below threshold ({dynamic_atr_threshold:.6f}) - skipping.")
             return
