@@ -14,7 +14,7 @@ symbol = 'PNUTUSDT'
 timeframe = '1m'
 ema_short_period = 9
 ema_long_period = 21
-quantity = 2
+quantity = 1
 leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
@@ -163,10 +163,8 @@ def place_order(signal, df):
             'slTriggerBy': 'LastPrice'
         })
 
-        exchange.create_order(symbol, 'takeProfitMarket', 'sell', qty_80, None, {
+        exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
             'positionIdx': 1,
-            'triggerPrice': round(tp_price, 4),
-            'triggerDirection': 1,
             'reduceOnly': True
         })
 
@@ -178,7 +176,7 @@ def place_order(signal, df):
 
         is_long_open = True
         last_signal = 'buy'
-        print(f"Executed BUY order: 80% at TP (visible), 20% floating")
+        print(f"Executed BUY order: 80% at TP (visible limit), 20% floating")
         threading.Thread(target=monitor_position, args=('buy',)).start()
 
     elif signal == 'sell' and not is_short_open:
@@ -195,10 +193,8 @@ def place_order(signal, df):
             'slTriggerBy': 'LastPrice'
         })
 
-        exchange.create_order(symbol, 'takeProfitMarket', 'buy', qty_80, None, {
+        exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
             'positionIdx': 2,
-            'triggerPrice': round(tp_price, 4),
-            'triggerDirection': 2,
             'reduceOnly': True
         })
 
@@ -210,7 +206,7 @@ def place_order(signal, df):
 
         is_short_open = True
         last_signal = 'sell'
-        print(f"Executed SELL order: 80% at TP (visible), 20% floating")
+        print(f"Executed SELL order: 80% at TP (visible limit), 20% floating")
         threading.Thread(target=monitor_position, args=('sell',)).start()
 
 def run_bot():
