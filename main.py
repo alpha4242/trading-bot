@@ -3,8 +3,10 @@ import pandas as pd
 import time
 import datetime
 import threading
+import ta
 import os
-
+# ====== BOT SIGNATURE ======
+print("📈 This bot is created by Aliv Mishra (AM27 Scalper) 🚀")
 # ====== CONFIGURATION ======
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -89,6 +91,25 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
+def close_position(positionIdx):
+    try:
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            if pos['symbol'] == symbol and int(pos['info']['positionIdx']) == positionIdx:
+                size = float(pos['contracts'])
+                if size > 0:
+                    side = 'sell' if positionIdx == 1 else 'buy'
+                    exchange.create_order(symbol, 'market', side, size, None, {
+                        'positionIdx': positionIdx,
+                        'reduceOnly': True
+                    })
+                    print(f"✅ Closed {side.upper()} position (size={size})")
+                else:
+                    print(f"⚠️ No open position to close for positionIdx={positionIdx}")
+                return
+    except Exception as e:
+        print(f"[Close Position Error]: {str(e)}")
+
 def monitor_position(position_type):
     global is_long_open, is_short_open
 
@@ -123,9 +144,7 @@ def monitor_position(position_type):
             print("[REVERSE] SELL signal detected during BUY position. Reversing...")
             close_position(1)
             is_long_open = False
-            time.sleep(2)
             if not enable_ema50_filter or df['close'].iloc[-1] < df['ema_50'].iloc[-1]:
-                print("[REVERSE] Entering SHORT after reversal")
                 place_order('sell', df)
             return
 
@@ -133,16 +152,9 @@ def monitor_position(position_type):
             print("[REVERSE] BUY signal detected during SELL position. Reversing...")
             close_position(2)
             is_short_open = False
-            time.sleep(2)
             if not enable_ema50_filter or df['close'].iloc[-1] > df['ema_50'].iloc[-1]:
-                print("[REVERSE] Entering LONG after reversal")
                 place_order('buy', df)
             return
-
-def close_position(positionIdx):
-    side = 'sell' if positionIdx == 1 else 'buy'
-    exchange.create_order(symbol, 'market', side, quantity, None, {'positionIdx': positionIdx})
-    print(f"Closed position with {side.upper()} order.")
 
 def place_order(signal, df):
     global is_long_open, is_short_open, last_signal
@@ -166,10 +178,12 @@ def place_order(signal, df):
                 'stopLoss': round(sl_price, 4),
                 'slTriggerBy': 'LastPrice'
             })
+
             exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
                 'positionIdx': 1,
                 'reduceOnly': True
             })
+
             exchange.create_order(symbol, 'market', 'buy', qty_20, None, {
                 'positionIdx': 1,
                 'stopLoss': round(sl_price, 4),
@@ -198,10 +212,12 @@ def place_order(signal, df):
                 'stopLoss': round(sl_price, 4),
                 'slTriggerBy': 'LastPrice'
             })
+
             exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
                 'positionIdx': 2,
                 'reduceOnly': True
             })
+
             exchange.create_order(symbol, 'market', 'sell', qty_20, None, {
                 'positionIdx': 2,
                 'stopLoss': round(sl_price, 4),
