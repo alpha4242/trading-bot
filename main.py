@@ -3,7 +3,6 @@ import pandas as pd
 import time
 import datetime
 import threading
-import ta
 import os
 
 # ====== CONFIGURATION ======
@@ -18,8 +17,8 @@ quantity = 6
 leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
-enable_ema50_filter = False  # Optional directional filter
-enable_rsi_exit = False      # Optional RSI-based exit
+enable_ema50_filter = False
+enable_rsi_exit = False
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -124,7 +123,9 @@ def monitor_position(position_type):
             print("[REVERSE] SELL signal detected during BUY position. Reversing...")
             close_position(1)
             is_long_open = False
+            time.sleep(2)
             if not enable_ema50_filter or df['close'].iloc[-1] < df['ema_50'].iloc[-1]:
+                print("[REVERSE] Entering SHORT after reversal")
                 place_order('sell', df)
             return
 
@@ -132,7 +133,9 @@ def monitor_position(position_type):
             print("[REVERSE] BUY signal detected during SELL position. Reversing...")
             close_position(2)
             is_short_open = False
+            time.sleep(2)
             if not enable_ema50_filter or df['close'].iloc[-1] > df['ema_50'].iloc[-1]:
+                print("[REVERSE] Entering LONG after reversal")
                 place_order('buy', df)
             return
 
@@ -163,12 +166,10 @@ def place_order(signal, df):
                 'stopLoss': round(sl_price, 4),
                 'slTriggerBy': 'LastPrice'
             })
-
             exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
                 'positionIdx': 1,
                 'reduceOnly': True
             })
-
             exchange.create_order(symbol, 'market', 'buy', qty_20, None, {
                 'positionIdx': 1,
                 'stopLoss': round(sl_price, 4),
@@ -197,12 +198,10 @@ def place_order(signal, df):
                 'stopLoss': round(sl_price, 4),
                 'slTriggerBy': 'LastPrice'
             })
-
             exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
                 'positionIdx': 2,
                 'reduceOnly': True
             })
-
             exchange.create_order(symbol, 'market', 'sell', qty_20, None, {
                 'positionIdx': 2,
                 'stopLoss': round(sl_price, 4),
