@@ -5,8 +5,7 @@ import datetime
 import threading
 import ta
 import os
-# ====== BOT SIGNATURE ======
-print("📈 This bot is created by Aliv Mishra (AM27 Scalper) 🚀")
+
 # ====== CONFIGURATION ======
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -112,10 +111,7 @@ def close_position(positionIdx):
 
 def monitor_position(position_type):
     global is_long_open, is_short_open
-
     print(f"[MONITOR] Started monitoring {position_type.upper()} position...")
-    entry_df = fetch_ohlcv(symbol, timeframe)
-    entry_price = entry_df['close'].iloc[-1]
 
     while True:
         time.sleep(15)
@@ -139,23 +135,6 @@ def monitor_position(position_type):
                 is_short_open = False
                 return
 
-        new_signal = get_ema_signal(df)
-        if position_type == 'buy' and new_signal == 'sell':
-            print("[REVERSE] SELL signal detected during BUY position. Reversing...")
-            close_position(1)
-            is_long_open = False
-            if not enable_ema50_filter or df['close'].iloc[-1] < df['ema_50'].iloc[-1]:
-                place_order('sell', df)
-            return
-
-        elif position_type == 'sell' and new_signal == 'buy':
-            print("[REVERSE] BUY signal detected during SELL position. Reversing...")
-            close_position(2)
-            is_short_open = False
-            if not enable_ema50_filter or df['close'].iloc[-1] > df['ema_50'].iloc[-1]:
-                place_order('buy', df)
-            return
-
 def place_order(signal, df):
     global is_long_open, is_short_open, last_signal
     recent_candles = df[-stoploss_lookback:]
@@ -164,73 +143,71 @@ def place_order(signal, df):
     if signal == last_signal:
         return
 
-    if signal == 'buy' and not is_long_open:
-        sl_price = recent_candles['low'].min()
-        risk = current_price - sl_price
-        tp_price = current_price + 3 * risk
+    if signal == 'buy':
+        if is_short_open:
+            print("[REVERSE] BUY signal during SHORT position. Closing short...")
+            close_position(2)
+            is_short_open = False
+        if not is_long_open:
+            sl_price = recent_candles['low'].min()
+            risk = current_price - sl_price
+            tp_price = current_price + 3 * risk
+            qty_80 = round(quantity * 0.8, 3)
+            qty_20 = quantity - qty_80
+            try:
+                exchange.create_order(symbol, 'market', 'buy', qty_80, None, {
+                    'positionIdx': 1,
+                    'stopLoss': round(sl_price, 4),
+                    'slTriggerBy': 'LastPrice'
+                })
+                exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
+                    'positionIdx': 1,
+                    'reduceOnly': True
+                })
+                exchange.create_order(symbol, 'market', 'buy', qty_20, None, {
+                    'positionIdx': 1,
+                    'stopLoss': round(sl_price, 4),
+                    'slTriggerBy': 'LastPrice'
+                })
+                is_long_open = True
+                last_signal = 'buy'
+                print("✅ Executed BUY order")
+                threading.Thread(target=monitor_position, args=('buy',)).start()
+            except Exception as e:
+                print(f"[Order Error - BUY]: {str(e)}")
 
-        qty_80 = round(quantity * 0.8, 3)
-        qty_20 = quantity - qty_80
-
-        try:
-            exchange.create_order(symbol, 'market', 'buy', qty_80, None, {
-                'positionIdx': 1,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-
-            exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
-                'positionIdx': 1,
-                'reduceOnly': True
-            })
-
-            exchange.create_order(symbol, 'market', 'buy', qty_20, None, {
-                'positionIdx': 1,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-
-            is_long_open = True
-            last_signal = 'buy'
-            print(f"✅ Executed BUY order: 80% at TP (visible limit), 20% floating")
-            threading.Thread(target=monitor_position, args=('buy',)).start()
-
-        except Exception as e:
-            print(f"[Order Error - BUY]: {str(e)}")
-
-    elif signal == 'sell' and not is_short_open:
-        sl_price = recent_candles['high'].max()
-        risk = sl_price - current_price
-        tp_price = current_price - 3 * risk
-
-        qty_80 = round(quantity * 0.8, 3)
-        qty_20 = quantity - qty_80
-
-        try:
-            exchange.create_order(symbol, 'market', 'sell', qty_80, None, {
-                'positionIdx': 2,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-
-            exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
-                'positionIdx': 2,
-                'reduceOnly': True
-            })
-
-            exchange.create_order(symbol, 'market', 'sell', qty_20, None, {
-                'positionIdx': 2,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-
-            is_short_open = True
-            last_signal = 'sell'
-            print(f"✅ Executed SELL order: 80% at TP (visible limit), 20% floating")
-            threading.Thread(target=monitor_position, args=('sell',)).start()
-
-        except Exception as e:
-            print(f"[Order Error - SELL]: {str(e)}")
+    elif signal == 'sell':
+        if is_long_open:
+            print("[REVERSE] SELL signal during LONG position. Closing long...")
+            close_position(1)
+            is_long_open = False
+        if not is_short_open:
+            sl_price = recent_candles['high'].max()
+            risk = sl_price - current_price
+            tp_price = current_price - 3 * risk
+            qty_80 = round(quantity * 0.8, 3)
+            qty_20 = quantity - qty_80
+            try:
+                exchange.create_order(symbol, 'market', 'sell', qty_80, None, {
+                    'positionIdx': 2,
+                    'stopLoss': round(sl_price, 4),
+                    'slTriggerBy': 'LastPrice'
+                })
+                exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
+                    'positionIdx': 2,
+                    'reduceOnly': True
+                })
+                exchange.create_order(symbol, 'market', 'sell', qty_20, None, {
+                    'positionIdx': 2,
+                    'stopLoss': round(sl_price, 4),
+                    'slTriggerBy': 'LastPrice'
+                })
+                is_short_open = True
+                last_signal = 'sell'
+                print("✅ Executed SELL order")
+                threading.Thread(target=monitor_position, args=('sell',)).start()
+            except Exception as e:
+                print(f"[Order Error - SELL]: {str(e)}")
 
 def run_bot():
     print(f"\nRunning bot at {datetime.datetime.now()}")
