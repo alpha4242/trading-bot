@@ -19,7 +19,7 @@ leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
 enable_ema50_filter = False  # Optional directional filter
-enable_rsi_exit = True      # Optional RSI-based exit
+enable_rsi_exit = False      # Optional RSI-based exit
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
