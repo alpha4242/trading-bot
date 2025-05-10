@@ -3,7 +3,6 @@ import pandas as pd
 import time
 import datetime
 import threading
-import ta
 import os
 
 # ====== CONFIGURATION ======
@@ -102,7 +101,7 @@ def close_position(positionIdx):
                         'positionIdx': positionIdx,
                         'reduceOnly': True
                     })
-                    print(f"✅ Closed {side.upper()} position (size={size})")
+                    print(f"✅ Fully closed {side.upper()} position (size={size})")
                 else:
                     print(f"⚠️ No open position to close for positionIdx={positionIdx}")
                 return
