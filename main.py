@@ -2,7 +2,6 @@ import ccxt
 import pandas as pd
 import time
 import datetime
-import threading
 import os
 
 # ====== CONFIGURATION ======
@@ -16,9 +15,7 @@ ema_long_period = 21
 quantity = 6
 leverage = 10
 stoploss_lookback = 4
-rsi_diff_threshold = 8
 enable_ema50_filter = False
-enable_rsi_exit = False
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -38,8 +35,8 @@ current_position_type = None  # 'buy' or 'sell'
 
 
 def set_leverage(symbol, leverage):
-    market = exchange.market(symbol)
     try:
+        market = exchange.market(symbol)
         exchange.set_leverage(leverage, market['id'])
         print(f"Leverage set to {leverage}x for {symbol}")
     except ccxt.BaseError as e:
@@ -99,16 +96,21 @@ def close_all_positions():
     try:
         positions = exchange.fetch_positions([symbol])
         for pos in positions:
-            if pos['symbol'] == symbol:
-                position_idx = int(pos['info']['positionIdx'])
-                size = float(pos['contracts'])
-                if size > 0:
-                    side = 'sell' if position_idx == 1 else 'buy'
-                    exchange.create_order(symbol, 'market', side, size, None, {
-                        'positionIdx': position_idx,
-                        'reduceOnly': True
-                    })
-                    print(f"✅ Closed position {position_idx} ({side.upper()}) of size={size}")
+            if pos['symbol'] != symbol:
+                continue
+
+            size = float(pos['contracts'])
+            side = pos['side'].lower()  # 'long' or 'short'
+            position_idx = int(pos['info'].get('positionIdx', 0))
+
+            if size > 0:
+                close_side = 'sell' if side == 'long' else 'buy'
+                exchange.create_order(symbol, 'market', close_side, size, None, {
+                    'reduceOnly': True,
+                    'positionIdx': position_idx
+                })
+                print(f"✅ Closed {side.upper()} position of size {size}")
+
     except Exception as e:
         print(f"[Close All Error]: {str(e)}")
 
@@ -124,17 +126,16 @@ def place_trade(signal, df):
     qty_80 = round(quantity * 0.8, 3)
     qty_20 = quantity - qty_80
 
-    # Reverse or new trade setup
     if is_position_open:
         print("[REVERSE] Signal during existing position. Closing current position...")
         close_all_positions()
-        time.sleep(2)  # Ensure positions are closed
+        time.sleep(2)
 
     try:
         order_type = 'buy' if signal == 'buy' else 'sell'
         position_idx = 1 if order_type == 'buy' else 2
 
-        # 80% TP Order
+        # 80% TP order
         exchange.create_order(symbol, 'market', order_type, qty_80, None, {
             'positionIdx': position_idx,
             'stopLoss': round(sl_price, 4),
@@ -145,7 +146,7 @@ def place_trade(signal, df):
             'reduceOnly': True
         })
 
-        # 20% trailing order
+        # 20% trailing part
         exchange.create_order(symbol, 'market', order_type, qty_20, None, {
             'positionIdx': position_idx,
             'stopLoss': round(sl_price, 4),
