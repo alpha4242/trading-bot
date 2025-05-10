@@ -19,7 +19,7 @@ leverage = 10
 stoploss_lookback = 4
 rsi_diff_threshold = 8
 enable_ema50_filter = False  # Optional directional filter
-enable_rsi_exit = False      # Optional RSI-based exit
+enable_rsi_exit = True      # Optional RSI-based exit
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -36,6 +36,7 @@ exchange = ccxt.bybit({
 exchange.load_markets()
 is_long_open = False
 is_short_open = False
+last_signal = None
 
 def set_leverage(symbol, leverage):
     market = exchange.market(symbol)
@@ -141,9 +142,12 @@ def close_position(positionIdx):
     print(f"Closed position with {side.upper()} order.")
 
 def place_order(signal, df):
-    global is_long_open, is_short_open
+    global is_long_open, is_short_open, last_signal
     recent_candles = df[-stoploss_lookback:]
     current_price = df['close'].iloc[-1]
+
+    if signal == last_signal:
+        return
 
     if signal == 'buy' and not is_long_open:
         sl_price = recent_candles['low'].min()
@@ -153,14 +157,12 @@ def place_order(signal, df):
         qty_80 = round(quantity * 0.8, 3)
         qty_20 = quantity - qty_80
 
-        # 80% Market Order
         exchange.create_market_buy_order(symbol, qty_80, {
             'positionIdx': 1,
             'stopLoss': round(sl_price, 4),
             'slTriggerBy': 'LastPrice'
         })
 
-        # Place visible TP for 80%
         exchange.create_order(symbol, 'takeProfitMarket', 'sell', qty_80, None, {
             'positionIdx': 1,
             'triggerPrice': round(tp_price, 4),
@@ -168,7 +170,6 @@ def place_order(signal, df):
             'reduceOnly': True
         })
 
-        # 20% Market Order
         exchange.create_market_buy_order(symbol, qty_20, {
             'positionIdx': 1,
             'stopLoss': round(sl_price, 4),
@@ -176,6 +177,7 @@ def place_order(signal, df):
         })
 
         is_long_open = True
+        last_signal = 'buy'
         print(f"Executed BUY order: 80% at TP (visible), 20% floating")
         threading.Thread(target=monitor_position, args=('buy',)).start()
 
@@ -187,14 +189,12 @@ def place_order(signal, df):
         qty_80 = round(quantity * 0.8, 3)
         qty_20 = quantity - qty_80
 
-        # 80% Market Order
         exchange.create_market_sell_order(symbol, qty_80, {
             'positionIdx': 2,
             'stopLoss': round(sl_price, 4),
             'slTriggerBy': 'LastPrice'
         })
 
-        # Place visible TP for 80%
         exchange.create_order(symbol, 'takeProfitMarket', 'buy', qty_80, None, {
             'positionIdx': 2,
             'triggerPrice': round(tp_price, 4),
@@ -202,7 +202,6 @@ def place_order(signal, df):
             'reduceOnly': True
         })
 
-        # 20% Market Order
         exchange.create_market_sell_order(symbol, qty_20, {
             'positionIdx': 2,
             'stopLoss': round(sl_price, 4),
@@ -210,6 +209,7 @@ def place_order(signal, df):
         })
 
         is_short_open = True
+        last_signal = 'sell'
         print(f"Executed SELL order: 80% at TP (visible), 20% floating")
         threading.Thread(target=monitor_position, args=('sell',)).start()
 
