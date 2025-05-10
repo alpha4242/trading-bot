@@ -157,27 +157,31 @@ def place_order(signal, df):
         qty_80 = round(quantity * 0.8, 3)
         qty_20 = quantity - qty_80
 
-        exchange.create_market_buy_order(symbol, qty_80, {
-            'positionIdx': 1,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
+        try:
+            exchange.create_order(symbol, 'market', 'buy', qty_80, None, {
+                'positionIdx': 1,
+                'stopLoss': round(sl_price, 4),
+                'slTriggerBy': 'LastPrice'
+            })
 
-        exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
-            'positionIdx': 1,
-            'reduceOnly': True
-        })
+            exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
+                'positionIdx': 1,
+                'reduceOnly': True
+            })
 
-        exchange.create_market_buy_order(symbol, qty_20, {
-            'positionIdx': 1,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
+            exchange.create_order(symbol, 'market', 'buy', qty_20, None, {
+                'positionIdx': 1,
+                'stopLoss': round(sl_price, 4),
+                'slTriggerBy': 'LastPrice'
+            })
 
-        is_long_open = True
-        last_signal = 'buy'
-        print(f"Executed BUY order: 80% at TP (visible limit), 20% floating")
-        threading.Thread(target=monitor_position, args=('buy',)).start()
+            is_long_open = True
+            last_signal = 'buy'
+            print(f"✅ Executed BUY order: 80% at TP (visible limit), 20% floating")
+            threading.Thread(target=monitor_position, args=('buy',)).start()
+
+        except Exception as e:
+            print(f"[Order Error - BUY]: {str(e)}")
 
     elif signal == 'sell' and not is_short_open:
         sl_price = recent_candles['high'].max()
@@ -187,27 +191,31 @@ def place_order(signal, df):
         qty_80 = round(quantity * 0.8, 3)
         qty_20 = quantity - qty_80
 
-        exchange.create_market_sell_order(symbol, qty_80, {
-            'positionIdx': 2,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
+        try:
+            exchange.create_order(symbol, 'market', 'sell', qty_80, None, {
+                'positionIdx': 2,
+                'stopLoss': round(sl_price, 4),
+                'slTriggerBy': 'LastPrice'
+            })
 
-        exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
-            'positionIdx': 2,
-            'reduceOnly': True
-        })
+            exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
+                'positionIdx': 2,
+                'reduceOnly': True
+            })
 
-        exchange.create_market_sell_order(symbol, qty_20, {
-            'positionIdx': 2,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
+            exchange.create_order(symbol, 'market', 'sell', qty_20, None, {
+                'positionIdx': 2,
+                'stopLoss': round(sl_price, 4),
+                'slTriggerBy': 'LastPrice'
+            })
 
-        is_short_open = True
-        last_signal = 'sell'
-        print(f"Executed SELL order: 80% at TP (visible limit), 20% floating")
-        threading.Thread(target=monitor_position, args=('sell',)).start()
+            is_short_open = True
+            last_signal = 'sell'
+            print(f"✅ Executed SELL order: 80% at TP (visible limit), 20% floating")
+            threading.Thread(target=monitor_position, args=('sell',)).start()
+
+        except Exception as e:
+            print(f"[Order Error - SELL]: {str(e)}")
 
 def run_bot():
     print(f"\nRunning bot at {datetime.datetime.now()}")
