@@ -90,6 +90,16 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
+def get_current_position(symbol):
+    try:
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            if pos['symbol'] == symbol and abs(pos['contracts']) > 0:
+                return {'side': pos['side'], 'size': pos['contracts']}
+    except Exception as e:
+        print(f"[Position Fetch Error]: {str(e)}")
+    return None
+
 def monitor_position(position_type):
     global is_long_open, is_short_open
 
@@ -137,9 +147,20 @@ def monitor_position(position_type):
             return
 
 def close_position(positionIdx):
-    side = 'sell' if positionIdx == 1 else 'buy'
-    exchange.create_order(symbol, 'market', side, quantity, None, {'positionIdx': positionIdx})
-    print(f"Closed position with {side.upper()} order.")
+    position = get_current_position(symbol)
+    if position is None or position['size'] == 0:
+        print(f"[INFO] No position to close for positionIdx={positionIdx}. Skipping.")
+        return
+
+    side = 'buy' if position['side'].lower() == 'sell' else 'sell'
+    quantity = abs(position['size'])
+
+    print(f"[CLOSING] {side.upper()} {quantity} {symbol}")
+    try:
+        exchange.create_order(symbol, 'market', side, quantity, None, {'positionIdx': positionIdx})
+        print("[CLOSED] Position closed successfully.")
+    except Exception as e:
+        print(f"[ERROR] Failed to close position: {e}")
 
 def place_order(signal, df):
     global is_long_open, is_short_open, last_signal
