@@ -33,7 +33,6 @@ exchange.load_markets()
 is_position_open = False
 current_position_type = None  # 'buy' or 'sell'
 
-
 def set_leverage(symbol, leverage):
     try:
         market = exchange.market(symbol)
@@ -45,20 +44,17 @@ def set_leverage(symbol, leverage):
         else:
             print(f"[Leverage Error]: {str(e)}")
 
-
 def fetch_ohlcv(symbol, timeframe, limit=200):
     data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
 
-
 def calculate_ema(df, short, long):
     df['ema_short'] = df['close'].ewm(span=short, adjust=False).mean()
     df['ema_long'] = df['close'].ewm(span=long, adjust=False).mean()
     df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
     return df
-
 
 def calculate_rsi(df, period=14):
     delta = df['close'].diff()
@@ -69,7 +65,6 @@ def calculate_rsi(df, period=14):
     df['rsi_sma'] = df['rsi'].rolling(window=period).mean()
     return df
 
-
 def calculate_atr(df, period=14):
     df['H-L'] = df['high'] - df['low']
     df['H-PC'] = abs(df['high'] - df['close'].shift(1))
@@ -77,7 +72,6 @@ def calculate_atr(df, period=14):
     tr = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
     df['atr'] = tr.rolling(window=period).mean()
     return df
-
 
 def get_ema_signal(df):
     ema_short_prev2 = df['ema_short'].iloc[-3]
@@ -91,46 +85,35 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
-
 def close_position_and_wait():
     try:
-        positions = exchange.fetch_positions([symbol])
-        for pos in positions:
-            if pos['symbol'] != symbol:
-                continue
-
-            size = float(pos['contracts'])
-            side = pos['side'].lower()  # 'long' or 'short'
-            position_idx = int(pos['info'].get('positionIdx', 0))
-
-            if size > 0:
-                close_side = 'sell' if side == 'long' else 'buy'
-                exchange.create_order(symbol, 'market', close_side, size, None, {
-                    'reduceOnly': True,
-                    'positionIdx': position_idx
-                })
-                print(f"⚠️ Closing {side.upper()} position of size {size}...")
-
-        # Confirm it's closed
         max_wait = 10
         waited = 0
         while waited < max_wait:
             positions = exchange.fetch_positions([symbol])
+            closed = True
             for pos in positions:
-                if pos['symbol'] == symbol and float(pos['contracts']) > 0:
-                    break
-            else:
+                if pos['symbol'] != symbol:
+                    continue
+                size = float(pos['contracts'])
+                if size > 0:
+                    side = pos['side'].lower()
+                    close_side = 'sell' if side == 'long' else 'buy'
+                    position_idx = int(pos['info'].get('positionIdx', 0))
+                    exchange.create_order(symbol, 'market', close_side, size, None, {
+                        'reduceOnly': True,
+                        'positionIdx': position_idx
+                    })
+                    print(f"⚠️ Closing {side.upper()} position of size {size}...")
+                    closed = False
+            if closed:
                 print("✅ Position fully closed.")
                 return
-
             time.sleep(1)
             waited += 1
-
         print("⚠️ Warning: Position may not have fully closed after waiting.")
-
     except Exception as e:
         print(f"[Close Position Error]: {str(e)}")
-
 
 def place_trade(signal, df):
     global is_position_open, current_position_type
@@ -147,13 +130,12 @@ def place_trade(signal, df):
         print("[REVERSE] Signal during existing position. Closing current position first...")
         close_position_and_wait()
         is_position_open = False
-        time.sleep(1)  # slight delay to ensure exchange sync
+        time.sleep(1)
 
     try:
         order_type = 'buy' if signal == 'buy' else 'sell'
         position_idx = 1 if order_type == 'buy' else 2
 
-        # 80% TP order
         exchange.create_order(symbol, 'market', order_type, qty_80, None, {
             'positionIdx': position_idx,
             'stopLoss': round(sl_price, 4),
@@ -163,8 +145,6 @@ def place_trade(signal, df):
             'positionIdx': position_idx,
             'reduceOnly': True
         })
-
-        # 20% trailing part (manual, currently just another market entry with SL)
         exchange.create_order(symbol, 'market', order_type, qty_20, None, {
             'positionIdx': position_idx,
             'stopLoss': round(sl_price, 4),
@@ -177,7 +157,6 @@ def place_trade(signal, df):
 
     except Exception as e:
         print(f"[Order Error]: {str(e)}")
-
 
 def run_bot():
     print(f"\nRunning bot at {datetime.datetime.now()}")
@@ -214,7 +193,6 @@ def run_bot():
 
     except Exception as e:
         print(f"[Bot Error]: {str(e)}")
-
 
 # ====== LOOP ======
 while True:
