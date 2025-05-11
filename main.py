@@ -92,7 +92,7 @@ def get_ema_signal(df):
     return None
 
 
-def close_all_positions():
+def close_position_and_wait():
     try:
         positions = exchange.fetch_positions([symbol])
         for pos in positions:
@@ -109,10 +109,27 @@ def close_all_positions():
                     'reduceOnly': True,
                     'positionIdx': position_idx
                 })
-                print(f"✅ Closed {side.upper()} position of size {size}")
+                print(f"⚠️ Closing {side.upper()} position of size {size}...")
+
+        # Confirm it's closed
+        max_wait = 10
+        waited = 0
+        while waited < max_wait:
+            positions = exchange.fetch_positions([symbol])
+            for pos in positions:
+                if pos['symbol'] == symbol and float(pos['contracts']) > 0:
+                    break
+            else:
+                print("✅ Position fully closed.")
+                return
+
+            time.sleep(1)
+            waited += 1
+
+        print("⚠️ Warning: Position may not have fully closed after waiting.")
 
     except Exception as e:
-        print(f"[Close All Error]: {str(e)}")
+        print(f"[Close Position Error]: {str(e)}")
 
 
 def place_trade(signal, df):
@@ -127,9 +144,10 @@ def place_trade(signal, df):
     qty_20 = quantity - qty_80
 
     if is_position_open:
-        print("[REVERSE] Signal during existing position. Closing current position...")
-        close_all_positions()
-        time.sleep(2)
+        print("[REVERSE] Signal during existing position. Closing current position first...")
+        close_position_and_wait()
+        is_position_open = False
+        time.sleep(1)  # slight delay to ensure exchange sync
 
     try:
         order_type = 'buy' if signal == 'buy' else 'sell'
@@ -146,7 +164,7 @@ def place_trade(signal, df):
             'reduceOnly': True
         })
 
-        # 20% trailing part
+        # 20% trailing part (manual, currently just another market entry with SL)
         exchange.create_order(symbol, 'market', order_type, qty_20, None, {
             'positionIdx': position_idx,
             'stopLoss': round(sl_price, 4),
@@ -155,7 +173,7 @@ def place_trade(signal, df):
 
         is_position_open = True
         current_position_type = signal
-        print(f"✅ Executed {signal.upper()} order")
+        print(f"✅ Executed {signal.upper()} order at {current_price:.4f}")
 
     except Exception as e:
         print(f"[Order Error]: {str(e)}")
@@ -172,26 +190,26 @@ def run_bot():
 
         signal = get_ema_signal(df)
         if not signal:
-            print("ANALYSING THE MARKET")
+            print("🟡 No EMA crossover signal. Waiting...")
             return
 
         if enable_ema50_filter:
             price = df['close'].iloc[-1]
             ema_50 = df['ema_50'].iloc[-1]
             if signal == 'buy' and price < ema_50:
-                print("Skipping long because price < EMA50")
+                print("🔹 Skipping long: price < EMA50")
                 return
             elif signal == 'sell' and price > ema_50:
-                print("Skipping short because price > EMA50")
+                print("🔹 Skipping short: price > EMA50")
                 return
 
         average_price = df['close'].iloc[-14:].mean()
         dynamic_atr_threshold = average_price * 0.001
         if df['atr'].iloc[-1] < dynamic_atr_threshold:
-            print(f"Low ATR ({df['atr'].iloc[-1]:.6f}) below threshold ({dynamic_atr_threshold:.6f}) - skipping.")
+            print(f"🔸 Low ATR ({df['atr'].iloc[-1]:.6f}) < threshold ({dynamic_atr_threshold:.6f}) — skipping trade.")
             return
 
-        print(f"Confirmed signal: {signal.upper()}")
+        print(f"🔔 Confirmed EMA signal: {signal.upper()}")
         place_trade(signal, df)
 
     except Exception as e:
