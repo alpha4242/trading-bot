@@ -38,6 +38,14 @@ current_position_type = None  # 'buy' or 'sell'
 
 def set_leverage(symbol, leverage):
     try:
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            if pos['symbol'] == symbol:
+                current_leverage = float(pos['leverage'])
+                if current_leverage == leverage:
+                    print(f"Leverage already set to {leverage}x — skipping.")
+                    return
+                break
         exchange.set_leverage(leverage, symbol)
         print(f"Leverage set to {leverage}x for {symbol}")
     except Exception as e:
