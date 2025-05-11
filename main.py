@@ -190,7 +190,7 @@ def run_bot():
 
         signal = get_ema_signal(df)
         if not signal:
-            print("🟡 No EMA crossover signal. Waiting...")
+            print("🟡 am27 scalper market analysing")
             return
 
         if enable_ema50_filter:
@@ -209,7 +209,7 @@ def run_bot():
             print(f"🔸 Low ATR ({df['atr'].iloc[-1]:.6f}) < threshold ({dynamic_atr_threshold:.6f}) — skipping trade.")
             return
 
-        print(f"🔔 Confirmed EMA signal: {signal.upper()}")
+        print(f"🔔 Confirmed trade signal: {signal.upper()}")
         place_trade(signal, df)
 
     except Exception as e:
