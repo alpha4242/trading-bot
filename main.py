@@ -2,8 +2,6 @@ import ccxt
 import pandas as pd
 import time
 import datetime
-import threading
-import ta
 import os
 
 # ====== CONFIGURATION ======
@@ -17,9 +15,7 @@ ema_long_period = 21
 quantity = 6
 leverage = 10
 stoploss_lookback = 4
-rsi_diff_threshold = 8
-enable_ema50_filter = False  # Optional directional filter
-enable_rsi_exit = False      # Optional RSI-based exit
+enable_ema50_filter = False
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -34,13 +30,12 @@ exchange = ccxt.bybit({
 })
 
 exchange.load_markets()
-is_long_open = False
-is_short_open = False
-last_signal = None
+is_position_open = False
+current_position_type = None  # 'buy' or 'sell'
 
 def set_leverage(symbol, leverage):
-    market = exchange.market(symbol)
     try:
+        market = exchange.market(symbol)
         exchange.set_leverage(leverage, market['id'])
         print(f"Leverage set to {leverage}x for {symbol}")
     except ccxt.BaseError as e:
@@ -90,153 +85,78 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
-def get_current_position(symbol):
+def close_position_and_wait():
     try:
-        positions = exchange.fetch_positions([symbol])
-        for pos in positions:
-            if pos['symbol'] == symbol and abs(pos['contracts']) > 0:
-                return {'side': pos['side'], 'size': pos['contracts']}
-    except Exception as e:
-        print(f"[Position Fetch Error]: {str(e)}")
-    return None
-
-def monitor_position(position_type):
-    global is_long_open, is_short_open
-
-    print(f"[MONITOR] Started monitoring {position_type.upper()} position...")
-    entry_df = fetch_ohlcv(symbol, timeframe)
-    entry_price = entry_df['close'].iloc[-1]
-
-    while True:
-        time.sleep(15)
-        df = fetch_ohlcv(symbol, timeframe)
-        df = calculate_ema(df, ema_short_period, ema_long_period)
-        df = calculate_rsi(df)
-
-        if enable_rsi_exit:
-            rsi = df['rsi'].iloc[-1]
-            rsi_sma = df['rsi_sma'].iloc[-1]
-            diff = abs(rsi - rsi_sma)
-
-            if position_type == 'buy' and rsi < rsi_sma and diff >= rsi_diff_threshold:
-                print("[EXIT] RSI exit condition met for BUY")
-                close_position(1)
-                is_long_open = False
+        max_wait = 10
+        waited = 0
+        while waited < max_wait:
+            positions = exchange.fetch_positions([symbol])
+            closed = True
+            for pos in positions:
+                if pos['symbol'] != symbol:
+                    continue
+                size = float(pos['contracts'])
+                if size > 0:
+                    side = pos['side'].lower()
+                    close_side = 'sell' if side == 'long' else 'buy'
+                    position_idx = int(pos['info'].get('positionIdx', 0))
+                    exchange.create_order(symbol, 'market', close_side, size, None, {
+                        'reduceOnly': True,
+                        'positionIdx': position_idx
+                    })
+                    print(f"⚠️ Closing {side.upper()} position of size {size}...")
+                    closed = False
+            if closed:
+                print("✅ Position fully closed.")
                 return
-            elif position_type == 'sell' and rsi > rsi_sma and diff >= rsi_diff_threshold:
-                print("[EXIT] RSI exit condition met for SELL")
-                close_position(2)
-                is_short_open = False
-                return
-
-        new_signal = get_ema_signal(df)
-        if position_type == 'buy' and new_signal == 'sell':
-            print("[REVERSE] SELL signal detected during BUY position. Reversing...")
-            close_position(1)
-            is_long_open = False
-            if not enable_ema50_filter or df['close'].iloc[-1] < df['ema_50'].iloc[-1]:
-                place_order('sell', df)
-            return
-
-        elif position_type == 'sell' and new_signal == 'buy':
-            print("[REVERSE] BUY signal detected during SELL position. Reversing...")
-            close_position(2)
-            is_short_open = False
-            if not enable_ema50_filter or df['close'].iloc[-1] > df['ema_50'].iloc[-1]:
-                place_order('buy', df)
-            return
-
-def close_position(positionIdx):
-    position = get_current_position(symbol)
-    if position is None or position['size'] == 0:
-        print(f"[INFO] No position to close for positionIdx={positionIdx}. Skipping.")
-        return
-
-    side = 'buy' if position['side'].lower() == 'sell' else 'sell'
-    quantity = abs(position['size'])
-
-    print(f"[CLOSING] {side.upper()} {quantity} {symbol}")
-    try:
-        exchange.create_order(symbol, 'market', side, quantity, None, {'positionIdx': positionIdx})
-        print("[CLOSED] Position closed successfully.")
+            time.sleep(1)
+            waited += 1
+        print("⚠️ Warning: Position may not have fully closed after waiting.")
     except Exception as e:
-        print(f"[ERROR] Failed to close position: {e}")
+        print(f"[Close Position Error]: {str(e)}")
 
-def place_order(signal, df):
-    global is_long_open, is_short_open, last_signal
-    recent_candles = df[-stoploss_lookback:]
+def place_trade(signal, df):
+    global is_position_open, current_position_type
     current_price = df['close'].iloc[-1]
+    recent_candles = df[-stoploss_lookback:]
 
-    if signal == last_signal:
-        return
+    sl_price = recent_candles['low'].min() if signal == 'buy' else recent_candles['high'].max()
+    risk = abs(current_price - sl_price)
+    tp_price = current_price + 3 * risk if signal == 'buy' else current_price - 3 * risk
+    qty_80 = round(quantity * 0.8, 3)
+    qty_20 = quantity - qty_80
 
-    if signal == 'buy' and not is_long_open:
-        sl_price = recent_candles['low'].min()
-        risk = current_price - sl_price
-        tp_price = current_price + 3 * risk
+    if is_position_open:
+        print("[REVERSE] Signal during existing position. Closing current position first...")
+        close_position_and_wait()
+        is_position_open = False
+        time.sleep(1)
 
-        qty_80 = round(quantity * 0.8, 3)
-        qty_20 = quantity - qty_80
+    try:
+        order_type = 'buy' if signal == 'buy' else 'sell'
+        position_idx = 1 if order_type == 'buy' else 2
 
-        try:
-            exchange.create_order(symbol, 'market', 'buy', qty_80, None, {
-                'positionIdx': 1,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
+        exchange.create_order(symbol, 'market', order_type, qty_80, None, {
+            'positionIdx': position_idx,
+            'stopLoss': round(sl_price, 4),
+            'slTriggerBy': 'LastPrice'
+        })
+        exchange.create_order(symbol, 'limit', 'sell' if order_type == 'buy' else 'buy', qty_80, round(tp_price, 4), {
+            'positionIdx': position_idx,
+            'reduceOnly': True
+        })
+        exchange.create_order(symbol, 'market', order_type, qty_20, None, {
+            'positionIdx': position_idx,
+            'stopLoss': round(sl_price, 4),
+            'slTriggerBy': 'LastPrice'
+        })
 
-            exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
-                'positionIdx': 1,
-                'reduceOnly': True
-            })
+        is_position_open = True
+        current_position_type = signal
+        print(f"✅ Executed {signal.upper()} order at {current_price:.4f}")
 
-            exchange.create_order(symbol, 'market', 'buy', qty_20, None, {
-                'positionIdx': 1,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-
-            is_long_open = True
-            last_signal = 'buy'
-            print(f"✅ Executed BUY order: 80% at TP (visible limit), 20% floating")
-            threading.Thread(target=monitor_position, args=('buy',)).start()
-
-        except Exception as e:
-            print(f"[Order Error - BUY]: {str(e)}")
-
-    elif signal == 'sell' and not is_short_open:
-        sl_price = recent_candles['high'].max()
-        risk = sl_price - current_price
-        tp_price = current_price - 3 * risk
-
-        qty_80 = round(quantity * 0.8, 3)
-        qty_20 = quantity - qty_80
-
-        try:
-            exchange.create_order(symbol, 'market', 'sell', qty_80, None, {
-                'positionIdx': 2,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-
-            exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
-                'positionIdx': 2,
-                'reduceOnly': True
-            })
-
-            exchange.create_order(symbol, 'market', 'sell', qty_20, None, {
-                'positionIdx': 2,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-
-            is_short_open = True
-            last_signal = 'sell'
-            print(f"✅ Executed SELL order: 80% at TP (visible limit), 20% floating")
-            threading.Thread(target=monitor_position, args=('sell',)).start()
-
-        except Exception as e:
-            print(f"[Order Error - SELL]: {str(e)}")
+    except Exception as e:
+        print(f"[Order Error]: {str(e)}")
 
 def run_bot():
     print(f"\nRunning bot at {datetime.datetime.now()}")
@@ -249,27 +169,27 @@ def run_bot():
 
         signal = get_ema_signal(df)
         if not signal:
-            print("ANALYSING THE MARKET")
+            print("🟡 am27 scalper market analysing")
             return
 
         if enable_ema50_filter:
             price = df['close'].iloc[-1]
             ema_50 = df['ema_50'].iloc[-1]
             if signal == 'buy' and price < ema_50:
-                print("Skipping long because market is bearish (price < EMA50)")
+                print("🔹 Skipping long: price < EMA50")
                 return
             elif signal == 'sell' and price > ema_50:
-                print("Skipping short because market is bullish (price > EMA50)")
+                print("🔹 Skipping short: price > EMA50")
                 return
 
         average_price = df['close'].iloc[-14:].mean()
         dynamic_atr_threshold = average_price * 0.001
         if df['atr'].iloc[-1] < dynamic_atr_threshold:
-            print(f"Low ATR ({df['atr'].iloc[-1]:.6f}) below threshold ({dynamic_atr_threshold:.6f}) - skipping.")
+            print(f"🔸 Low ATR ({df['atr'].iloc[-1]:.6f}) < threshold ({dynamic_atr_threshold:.6f}) — skipping trade.")
             return
 
-        print(f"Confirmed signal: {signal.upper()}")
-        place_order(signal, df)
+        print(f"🔔 Confirmed trade signal: {signal.upper()}")
+        place_trade(signal, df)
 
     except Exception as e:
         print(f"[Bot Error]: {str(e)}")
