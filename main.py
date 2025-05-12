@@ -18,9 +18,9 @@ quantity = 15  # Total position size
 leverage = 10
 stoploss_lookback = 4  # For SL calculation
 rsi_diff_threshold = 8
-enable_ema50_filter = False
+enable_ema50_filter = True
 enable_rsi_exit = False
-enable_adx_filter = False  # ADX control switch
+enable_adx_filter = True  # ADX control switch
 adx_threshold = 20  # Minimum ADX value for valid trend
 adx_period = 14  # ADX calculation period
 
@@ -375,7 +375,7 @@ def run_bot():
 
         signal = get_ema_signal(df)
         if not signal:
-            print("No crossover signal")
+            print("ANALYSING THE MARKET")
             return
 
         # ADX Filter
