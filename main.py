@@ -43,38 +43,95 @@ last_signal = None
 trade_history = []  # For tracking performance
 
 # ====== TECHNICAL INDICATORS ======
-def wilder_smoothing(series, period):
-    result = [series.iloc[0]]
-    for i in range(1, len(series)):
-        result.append((result[-1] * (period - 1) + series.iloc[i]) / period)
-    return pd.Series(result, index=series.index)
-
 def calculate_adx(df, period=14):
-    df['tr'] = df[['high', 'low', 'close']].apply(lambda row: max(
-        row['high'] - row['low'],
-        abs(row['high'] - df['close'].shift(1).iloc[row.name]),
-        abs(row['low'] - df['close'].shift(1).iloc[row.name])
-    ), axis=1)
-
+    """
+    Calculate ADX, +DI, -DI according to Bybit's implementation
+    Returns DataFrame with 'adx', '+di', '-di' columns added
+    """
+    # Calculate True Range
+    df['prev_close'] = df['close'].shift(1)
+    df['tr'] = df[['high', 'low', 'prev_close']].apply(
+        lambda x: max(x['high'] - x['low'], 
+                     abs(x['high'] - x['prev_close']), 
+                     abs(x['low'] - x['prev_close'])),
+        axis=1
+    )
+    
+    # Calculate Directional Movements
     df['up_move'] = df['high'] - df['high'].shift(1)
     df['down_move'] = df['low'].shift(1) - df['low']
-    df['+dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
-    df['-dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
-
-    df['atr'] = wilder_smoothing(df['tr'], period)
-    df['+di'] = 100 * wilder_smoothing(pd.Series(df['+dm']), period) / df['atr']
-    df['-di'] = 100 * wilder_smoothing(pd.Series(df['-dm']), period) / df['atr']
+    
+    # Calculate +DM and -DM
+    df['+dm'] = np.where(
+        (df['up_move'] > df['down_move']) & (df['up_move'] > 0),
+        df['up_move'],
+        0
+    )
+    df['-dm'] = np.where(
+        (df['down_move'] > df['up_move']) & (df['down_move'] > 0),
+        df['down_move'],
+        0
+    )
+    
+    # Wilder's smoothing (RMA)
+    def wilder_smooth(series, window):
+        return series.ewm(
+            alpha=1.0/window, 
+            min_periods=window, 
+            adjust=False
+        ).mean()
+    
+    # Calculate smoothed TR, +DM, -DM
+    df['smoothed_tr'] = wilder_smooth(df['tr'], period)
+    df['smoothed_+dm'] = wilder_smooth(df['+dm'], period)
+    df['smoothed_-dm'] = wilder_smooth(df['-dm'], period)
+    
+    # Calculate +DI and -DI
+    df['+di'] = 100 * (df['smoothed_+dm'] / df['smoothed_tr'])
+    df['-di'] = 100 * (df['smoothed_-dm'] / df['smoothed_tr'])
+    
+    # Calculate DX
     df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
-    df['adx'] = wilder_smoothing(df['dx'], period)
+    
+    # Calculate ADX
+    df['adx'] = wilder_smooth(df['dx'], period)
+    
+    # Clean up intermediate columns
+    df.drop([
+        'prev_close', 'tr', 'up_move', 'down_move', 
+        '+dm', '-dm', 'smoothed_tr', 'smoothed_+dm', 
+        'smoothed_-dm', 'dx'
+    ], axis=1, inplace=True)
+    
+    return df
 
-    return df.drop(['tr', 'up_move', 'down_move'], axis=1)
+def calculate_ema(df, short, long):
+    df['ema_short'] = df['close'].ewm(span=short, adjust=False).mean()
+    df['ema_long'] = df['close'].ewm(span=long, adjust=False).mean()
+    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+    return df
 
-# The rest of the bot logic remains unchanged, since only the ADX calculation needed correction.
-# Let me know if you'd like me to review or optimize the rest of the code as well.
+def calculate_rsi(df, period=14):
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    df['rsi'] = 100 - (100 / (1 + rs))
+    return df
+
+def calculate_atr(df, period=14):
+    high_low = df['high'] - df['low']
+    high_close = abs(df['high'] - df['close'].shift(1))
+    low_close = abs(df['low'] - df['close'].shift(1))
+    df['tr'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['atr'] = df['tr'].rolling(period).mean()
+    return df
 
 # ====== POSITION MANAGEMENT ======
 def force_close_all_positions():
-    """Nuclear option to close ALL positions for the symbol"""
+    """Close ALL positions for the symbol"""
     try:
         exchange.cancel_all_orders(symbol)
         positions = exchange.fetch_positions([symbol])
@@ -163,27 +220,6 @@ def fetch_ohlcv(symbol, timeframe, limit=200):
     data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
-
-def calculate_ema(df, short, long):
-    df['ema_short'] = df['close'].ewm(span=short, adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=long, adjust=False).mean()
-    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
-    return df
-
-def calculate_rsi(df, period=14):
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    df['rsi'] = 100 - (100 / (1 + gain.rolling(period).mean() / loss.rolling(period).mean()))
-    df['rsi_sma'] = df['rsi'].rolling(period).mean()
-    return df
-
-def calculate_atr(df, period=14):
-    df['H-L'] = df['high'] - df['low']
-    df['H-PC'] = abs(df['high'] - df['close'].shift(1))
-    df['L-PC'] = abs(df['low'] - df['close'].shift(1))
-    df['atr'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1).rolling(period).mean()
     return df
 
 def get_ema_signal(df):
@@ -306,7 +342,7 @@ def place_order(signal, df):
         
         print(f"\n✅ Executed {signal.upper()} Order")
         print(f"Entry: {current_price:.4f} | SL: {sl_price:.4f}")
-        print(f"ADX: {df['adx'].iloc[-1]:.2f} (+DI: {df['+di'].iloc[-1]:.2f}, -DI: {df['-di'].iloc[-1]:.2f})")
+        print(f"ADX: {df['adx'].iloc[-1]:.4f} (+DI: {df['+di'].iloc[-1]:.4f}, -DI: {df['-di'].iloc[-1]:.4f})")
         print("Take Profits:")
         print(f"  TP1: {tp_prices[0]:.4f} (1:2, {quantities[0]} contracts)")
         print(f"  TP2: {tp_prices[1]:.4f} (1:3, {quantities[1]} contracts)")
@@ -329,13 +365,12 @@ def run_bot():
         df = calculate_atr(df)
         df = calculate_adx(df, adx_period)
 
-        # Print ADX values in logs
         current_adx = df['adx'].iloc[-1]
         plus_di = df['+di'].iloc[-1]
         minus_di = df['-di'].iloc[-1]
         
-        print(f"\nCurrent ADX: {current_adx:.2f}")
-        print(f"+DI: {plus_di:.2f} | -DI: {minus_di:.2f}")
+        print(f"\nCurrent ADX: {current_adx:.4f}")
+        print(f"+DI: {plus_di:.4f} | -DI: {minus_di:.4f}")
         print(f"Trend Strength: {'Strong' if current_adx >= adx_threshold else 'Weak'}")
 
         signal = get_ema_signal(df)
@@ -346,7 +381,7 @@ def run_bot():
         # ADX Filter
         if enable_adx_filter:
             if current_adx < adx_threshold:
-                print(f"ADX {current_adx:.2f} < threshold {adx_threshold} - Skipping trade")
+                print(f"ADX {current_adx:.4f} < threshold {adx_threshold} - Skipping trade")
                 return
                 
             if (signal == 'buy' and plus_di < minus_di) or (signal == 'sell' and minus_di < plus_di):
@@ -366,7 +401,7 @@ def run_bot():
             print("Low volatility (ATR filter)")
             return
 
-        print(f"Confirmed {signal.upper()} signal with ADX {current_adx:.2f}")
+        print(f"Confirmed {signal.upper()} signal with ADX {current_adx:.4f}")
         place_order(signal, df)
 
     except Exception as e:
