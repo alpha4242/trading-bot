@@ -13,9 +13,9 @@ symbol = 'PNUTUSDT'
 timeframe = '1m'
 ema_short_period = 9
 ema_long_period = 21
-quantity = 6
+quantity = 6  # Total position size
 leverage = 10
-stoploss_lookback = 4
+stoploss_lookback = 4  # For SL calculation
 rsi_diff_threshold = 8
 enable_ema50_filter = False
 enable_rsi_exit = False
@@ -232,68 +232,95 @@ def place_order(signal, df):
         time.sleep(2)  # Mandatory cooling period
         sync_position_state()  # Double-check
 
-    # 2. Proceed with new trade
-    try:
-        if signal == 'buy' and not is_long_open:
-            sl_price = recent_candles['low'].min()
-            risk = current_price - sl_price
-            tp_price = current_price + 3 * risk
-            qty_80 = round(quantity * 0.8, 3)
-            qty_20 = quantity - qty_80
-            
-            exchange.create_order(symbol, 'market', 'buy', qty_80, None, {
-                'positionIdx': 1,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-            exchange.create_order(symbol, 'limit', 'sell', qty_80, round(tp_price, 4), {
-                'positionIdx': 1,
-                'reduceOnly': True
-            })
-            exchange.create_order(symbol, 'market', 'buy', qty_20, None, {
-                'positionIdx': 1,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-            
-            is_long_open = True
-            last_signal = 'buy'
-            print("✅ Executed BUY order")
-            threading.Thread(target=monitor_position, args=('buy',)).start()
+    # 2. Calculate risk and position splits
+    if signal == 'buy':
+        sl_price = recent_candles['low'].min()
+        risk = current_price - sl_price
+        tp_prices = [
+            current_price + 2 * risk,  # 1:2
+            current_price + 3 * risk,  # 1:3
+            current_price + 4 * risk   # 1:4
+        ]
+    else:  # sell
+        sl_price = recent_candles['high'].max()
+        risk = sl_price - current_price
+        tp_prices = [
+            current_price - 2 * risk,  # 1:2
+            current_price - 3 * risk,  # 1:3
+            current_price - 4 * risk   # 1:4
+        ]
 
-        elif signal == 'sell' and not is_short_open:
-            sl_price = recent_candles['high'].max()
-            risk = sl_price - current_price
-            tp_price = current_price - 3 * risk
-            qty_80 = round(quantity * 0.8, 3)
-            qty_20 = quantity - qty_80
-            
-            exchange.create_order(symbol, 'market', 'sell', qty_80, None, {
-                'positionIdx': 2,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-            exchange.create_order(symbol, 'limit', 'buy', qty_80, round(tp_price, 4), {
-                'positionIdx': 2,
-                'reduceOnly': True
-            })
-            exchange.create_order(symbol, 'market', 'sell', qty_20, None, {
-                'positionIdx': 2,
-                'stopLoss': round(sl_price, 4),
-                'slTriggerBy': 'LastPrice'
-            })
-            
+    # 3. Position sizing (40% + 30% + 20% + 10% runner)
+    quantities = [
+        round(quantity * 0.40, 3),  # 40% for 1:2
+        round(quantity * 0.30, 3),  # 30% for 1:3
+        round(quantity * 0.20, 3),  # 20% for 1:4
+        round(quantity * 0.10, 3)   # 10% runner
+    ]
+
+    # 4. Execute orders
+    try:
+        positionIdx = 1 if signal == 'buy' else 2
+        close_side = 'sell' if signal == 'buy' else 'buy'
+        
+        # TP1 (1:2)
+        exchange.create_order(symbol, 'market', signal, quantities[0], None, {
+            'positionIdx': positionIdx,
+            'stopLoss': round(sl_price, 4),
+            'slTriggerBy': 'LastPrice'
+        })
+        exchange.create_order(symbol, 'limit', close_side, quantities[0], round(tp_prices[0], 4), {
+            'positionIdx': positionIdx,
+            'reduceOnly': True
+        })
+
+        # TP2 (1:3)
+        exchange.create_order(symbol, 'market', signal, quantities[1], None, {
+            'positionIdx': positionIdx,
+            'stopLoss': round(sl_price, 4),
+            'slTriggerBy': 'LastPrice'
+        })
+        exchange.create_order(symbol, 'limit', close_side, quantities[1], round(tp_prices[1], 4), {
+            'positionIdx': positionIdx,
+            'reduceOnly': True
+        })
+
+        # TP3 (1:4)
+        exchange.create_order(symbol, 'market', signal, quantities[2], None, {
+            'positionIdx': positionIdx,
+            'stopLoss': round(sl_price, 4),
+            'slTriggerBy': 'LastPrice'
+        })
+        exchange.create_order(symbol, 'limit', close_side, quantities[2], round(tp_prices[2], 4), {
+            'positionIdx': positionIdx,
+            'reduceOnly': True
+        })
+
+        # Runner (10%)
+        exchange.create_order(symbol, 'market', signal, quantities[3], None, {
+            'positionIdx': positionIdx,
+            'stopLoss': round(sl_price, 4),
+            'slTriggerBy': 'LastPrice'
+        })
+
+        # Update state
+        if signal == 'buy':
+            is_long_open = True
+        else:
             is_short_open = True
-            last_signal = 'sell'
-            print("✅ Executed SELL order")
-            threading.Thread(target=monitor_position, args=('sell',)).start()
+        last_signal = signal
+        
+        print(f"✅ Executed {signal.upper()} order with 3TPs+Runner")
+        print(f"TP1: {round(tp_prices[0], 4)} (1:2, {quantities[0]} contracts)")
+        print(f"TP2: {round(tp_prices[1], 4)} (1:3, {quantities[1]} contracts)")
+        print(f"TP3: {round(tp_prices[2], 4)} (1:4, {quantities[2]} contracts)") 
+        print(f"Runner: No TP ({quantities[3]} contracts)")
+        
+        threading.Thread(target=monitor_position, args=(signal,)).start()
 
     except Exception as e:
         print(f"[Order Error]: {str(e)}")
-        # Emergency cleanup if order fails
-        sync_position_state()
-        if is_long_open or is_short_open:
-            force_close_all_positions()
+        force_close_all_positions()
 
 def run_bot():
     print(f"\nRunning bot at {datetime.datetime.now()}")
@@ -338,6 +365,7 @@ if __name__ == "__main__":
     print(f"Symbol: {symbol}")
     print(f"Timeframe: {timeframe}")
     print(f"Strategy: EMA{ema_short_period}/EMA{ema_long_period} Crossover")
+    print(f"Risk Management: 3TPs (1:2,1:3,1:4) + 10% Runner")
     
     # Initial position sync
     sync_position_state()
