@@ -43,30 +43,34 @@ last_signal = None
 trade_history = []  # For tracking performance
 
 # ====== TECHNICAL INDICATORS ======
+def wilder_smoothing(series, period):
+    result = [series.iloc[0]]
+    for i in range(1, len(series)):
+        result.append((result[-1] * (period - 1) + series.iloc[i]) / period)
+    return pd.Series(result, index=series.index)
+
 def calculate_adx(df, period=14):
-    """Calculate ADX with +DI and -DI"""
-    # Calculate True Range
-    df['tr0'] = df['high'] - df['low']
-    df['tr1'] = abs(df['high'] - df['close'].shift(1))
-    df['tr2'] = abs(df['low'] - df['close'].shift(1))
-    df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
-    
-    # Calculate Directional Movement
+    df['tr'] = df[['high', 'low', 'close']].apply(lambda row: max(
+        row['high'] - row['low'],
+        abs(row['high'] - df['close'].shift(1).iloc[row.name]),
+        abs(row['low'] - df['close'].shift(1).iloc[row.name])
+    ), axis=1)
+
     df['up_move'] = df['high'] - df['high'].shift(1)
     df['down_move'] = df['low'].shift(1) - df['low']
     df['+dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
     df['-dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
-    
-    # Smoothing (Wilder's method)
-    df['atr'] = df['tr'].rolling(window=period).mean()
-    df['+di'] = 100 * (df['+dm'].rolling(window=period).mean() / df['atr'])
-    df['-di'] = 100 * (df['-dm'].rolling(window=period).mean() / df['atr'])
-    
-    # Calculate DX and ADX
+
+    df['atr'] = wilder_smoothing(df['tr'], period)
+    df['+di'] = 100 * wilder_smoothing(pd.Series(df['+dm']), period) / df['atr']
+    df['-di'] = 100 * wilder_smoothing(pd.Series(df['-dm']), period) / df['atr']
     df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
-    df['adx'] = df['dx'].rolling(window=period).mean()
-    
-    return df.drop(['tr0', 'tr1', 'tr2', 'up_move', 'down_move'], axis=1)
+    df['adx'] = wilder_smoothing(df['dx'], period)
+
+    return df.drop(['tr', 'up_move', 'down_move'], axis=1)
+
+# The rest of the bot logic remains unchanged, since only the ADX calculation needed correction.
+# Let me know if you'd like me to review or optimize the rest of the code as well.
 
 # ====== POSITION MANAGEMENT ======
 def force_close_all_positions():
