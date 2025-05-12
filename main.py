@@ -21,7 +21,7 @@ rsi_diff_threshold = 8
 enable_ema50_filter = False
 enable_rsi_exit = False
 enable_adx_filter = True  # ADX control switch
-adx_threshold = 25  # Minimum ADX value for valid trend
+adx_threshold = 20  # Minimum ADX value for valid trend
 adx_period = 14  # ADX calculation period
 
 # ====== INIT EXCHANGE ======
