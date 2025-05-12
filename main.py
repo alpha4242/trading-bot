@@ -1,5 +1,6 @@
 import ccxt
 import pandas as pd
+import numpy as np
 import time
 import datetime
 import threading
@@ -19,6 +20,9 @@ stoploss_lookback = 4  # For SL calculation
 rsi_diff_threshold = 8
 enable_ema50_filter = False
 enable_rsi_exit = False
+enable_adx_filter = True  # ADX control switch
+adx_threshold = 25  # Minimum ADX value for valid trend
+adx_period = 14  # ADX calculation period
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -36,18 +40,41 @@ exchange.load_markets()
 is_long_open = False
 is_short_open = False
 last_signal = None
+trade_history = []  # For tracking performance
 
-# ====== ENHANCED POSITION MANAGEMENT ======
+# ====== TECHNICAL INDICATORS ======
+def calculate_adx(df, period=14):
+    """Calculate ADX with +DI and -DI"""
+    # Calculate True Range
+    df['tr0'] = df['high'] - df['low']
+    df['tr1'] = abs(df['high'] - df['close'].shift(1))
+    df['tr2'] = abs(df['low'] - df['close'].shift(1))
+    df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
+    
+    # Calculate Directional Movement
+    df['up_move'] = df['high'] - df['high'].shift(1)
+    df['down_move'] = df['low'].shift(1) - df['low']
+    df['+dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
+    df['-dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
+    
+    # Smoothing (Wilder's method)
+    df['atr'] = df['tr'].rolling(window=period).mean()
+    df['+di'] = 100 * (df['+dm'].rolling(window=period).mean() / df['atr']
+    df['-di'] = 100 * (df['-dm'].rolling(window=period).mean() / df['atr']
+    
+    # Calculate DX and ADX
+    df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
+    df['adx'] = df['dx'].rolling(window=period).mean()
+    
+    return df.drop(['tr0', 'tr1', 'tr2', 'up_move', 'down_move'], axis=1)
+
+# ====== POSITION MANAGEMENT ======
 def force_close_all_positions():
     """Nuclear option to close ALL positions for the symbol"""
     try:
-        # 1. Cancel all active orders first
         exchange.cancel_all_orders(symbol)
-        
-        # 2. Get all open positions
         positions = exchange.fetch_positions([symbol])
         
-        # 3. Close all positions
         for pos in positions:
             if float(pos['contracts']) > 0:
                 close_side = 'sell' if pos['side'].lower() == 'long' else 'buy'
@@ -61,16 +88,13 @@ def force_close_all_positions():
                 )
                 print(f"🔴 Force-closing {pos['side']} position")
         
-        # 4. Verify closure
         for _ in range(5):
             time.sleep(1)
-            remaining_positions = [p for p in exchange.fetch_positions([symbol]) 
-                                if float(p['contracts']) > 0]
-            if not remaining_positions:
+            if not any(p for p in exchange.fetch_positions([symbol]) if float(p['contracts']) > 0):
                 print("✅ All positions confirmed closed")
                 return True
                 
-        print("❗ Some positions may remain open after forced closure")
+        print("❗ Some positions may remain open")
         return False
         
     except Exception as e:
@@ -79,7 +103,7 @@ def force_close_all_positions():
 
 def close_position(positionIdx):
     """Enhanced position closing with verification"""
-    for attempt in range(3):  # 3 attempts
+    for attempt in range(3):
         try:
             positions = exchange.fetch_positions([symbol])
             pos = next((p for p in positions if 
@@ -87,9 +111,8 @@ def close_position(positionIdx):
                       float(p['contracts']) > 0), None)
             
             if not pos:
-                return True  # Already closed
+                return True
                 
-            # Market order to close
             close_side = 'sell' if positionIdx == 1 else 'buy'
             exchange.create_order(
                 symbol,
@@ -100,12 +123,10 @@ def close_position(positionIdx):
                 {'reduceOnly': True, 'positionIdx': positionIdx}
             )
             
-            # Verification
             for _ in range(5):
                 time.sleep(1)
-                current_pos = exchange.fetch_positions([symbol])
-                if not any(p for p in current_pos if 
-                          int(p['info']['positionIdx']) == positionIdx and 
+                if not any(p for p in exchange.fetch_positions([symbol]) 
+                          if int(p['info']['positionIdx']) == positionIdx and 
                           float(p['contracts']) > 0):
                     return True
                     
@@ -113,7 +134,6 @@ def close_position(positionIdx):
             print(f"Attempt {attempt + 1} failed: {str(e)}")
             time.sleep(2)
     
-    print("🔴 Falling back to force-close-all")
     return force_close_all_positions()
 
 def sync_position_state():
@@ -128,14 +148,11 @@ def sync_position_state():
 
 # ====== TRADING FUNCTIONS ======
 def set_leverage(symbol, leverage):
-    market = exchange.market(symbol)
     try:
-        exchange.set_leverage(leverage, market['id'])
-        print(f"Leverage set to {leverage}x for {symbol}")
+        exchange.set_leverage(leverage, symbol)
+        print(f"Leverage set to {leverage}x")
     except ccxt.BaseError as e:
-        if "leverage not modified" in str(e).lower():
-            print(f"Leverage already set to {leverage}x for {symbol}")
-        else:
+        if "leverage not modified" not in str(e).lower():
             print(f"[Leverage Error]: {str(e)}")
 
 def fetch_ohlcv(symbol, timeframe, limit=200):
@@ -152,19 +169,17 @@ def calculate_ema(df, short, long):
 
 def calculate_rsi(df, period=14):
     delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    df['rsi_sma'] = df['rsi'].rolling(window=period).mean()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    df['rsi'] = 100 - (100 / (1 + gain.rolling(period).mean() / loss.rolling(period).mean()))
+    df['rsi_sma'] = df['rsi'].rolling(period).mean()
     return df
 
 def calculate_atr(df, period=14):
     df['H-L'] = df['high'] - df['low']
     df['H-PC'] = abs(df['high'] - df['close'].shift(1))
     df['L-PC'] = abs(df['low'] - df['close'].shift(1))
-    tr = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-    df['atr'] = tr.rolling(window=period).mean()
+    df['atr'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1).rolling(period).mean()
     return df
 
 def get_ema_signal(df):
@@ -179,144 +194,118 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
-def monitor_position(position_type):
-    global is_long_open, is_short_open
-    print(f"[MONITOR] Started monitoring {position_type.upper()} position...")
-
+def log_pnl(position_type):
+    """Real-time PNL monitoring"""
+    print(f"\n=== PNL Monitoring ({position_type.upper()}) ===")
     while True:
-        time.sleep(15)
-        df = fetch_ohlcv(symbol, timeframe)
-        df = calculate_ema(df, ema_short_period, ema_long_period)
-        df = calculate_rsi(df)
-
-        if enable_rsi_exit:
-            rsi = df['rsi'].iloc[-1]
-            rsi_sma = df['rsi_sma'].iloc[-1]
-            diff = abs(rsi - rsi_sma)
-
-            if position_type == 'buy' and rsi < rsi_sma and diff >= rsi_diff_threshold:
-                print("[EXIT] RSI exit condition met for BUY")
-                close_position(1)
-                is_long_open = False
-                return
-            elif position_type == 'sell' and rsi > rsi_sma and diff >= rsi_diff_threshold:
-                print("[EXIT] RSI exit condition met for SELL")
-                close_position(2)
-                is_short_open = False
-                return
+        try:
+            positions = exchange.fetch_positions([symbol])
+            pos = next((p for p in positions if 
+                       p['symbol'] == symbol and 
+                       float(p['contracts']) > 0), None)
+            
+            if not pos:
+                break
+                
+            print(
+                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                f"Unrealized PNL: ${float(pos['unrealizedPnl']):.2f} | "
+                f"Entry: {float(pos['entryPrice']):.4f}"
+            )
+            time.sleep(15)
+        except Exception as e:
+            print(f"[PNL Error]: {str(e)}")
+            break
 
 def place_order(signal, df):
-    global is_long_open, is_short_open, last_signal
+    global is_long_open, is_short_open, last_signal, trade_history
     
-    # Sync with actual positions before trading
     sync_position_state()
-    
     recent_candles = df[-stoploss_lookback:]
     current_price = df['close'].iloc[-1]
 
     if signal == last_signal:
         return
 
-    # 1. Close opposite position first
+    # Close opposite position
     if (signal == 'buy' and is_short_open) or (signal == 'sell' and is_long_open):
         position_to_close = 2 if is_short_open else 1
-        print(f"[REVERSE] {signal.upper()} signal during existing position. Closing first...")
-        
         if not close_position(position_to_close):
-            print("❌ Critical: Failed to close position - aborting trade")
             return
-        
-        # Update state only after successful closure
-        is_long_open = False
-        is_short_open = False
-        time.sleep(2)  # Mandatory cooling period
-        sync_position_state()  # Double-check
+        is_long_open = is_short_open = False
+        time.sleep(2)
+        sync_position_state()
 
-    # 2. Calculate risk and position splits
+    # Calculate risk parameters
     if signal == 'buy':
         sl_price = recent_candles['low'].min()
         risk = current_price - sl_price
-        tp_prices = [
-            current_price + 2 * risk,  # 1:2
-            current_price + 3 * risk,  # 1:3
-            current_price + 4 * risk   # 1:4
-        ]
-    else:  # sell
+        tp_prices = [current_price + r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
+    else:
         sl_price = recent_candles['high'].max()
         risk = sl_price - current_price
-        tp_prices = [
-            current_price - 2 * risk,  # 1:2
-            current_price - 3 * risk,  # 1:3
-            current_price - 4 * risk   # 1:4
-        ]
+        tp_prices = [current_price - r * risk for r in [2, 3, 4]]
 
-    # 3. Position sizing (40% + 30% + 20% + 10% runner)
     quantities = [
-        round(quantity * 0.40, 3),  # 40% for 1:2
-        round(quantity * 0.30, 3),  # 30% for 1:3
-        round(quantity * 0.20, 3),  # 20% for 1:4
-        round(quantity * 0.10, 3)   # 10% runner
-    ]
+        round(quantity * p, 3) for p in [0.40, 0.30, 0.20]  # 40%, 30%, 20%
+    ] + [round(quantity * 0.10, 3)]  # 10% runner
 
-    # 4. Execute orders
     try:
         positionIdx = 1 if signal == 'buy' else 2
         close_side = 'sell' if signal == 'buy' else 'buy'
         
-        # TP1 (1:2)
-        exchange.create_order(symbol, 'market', signal, quantities[0], None, {
-            'positionIdx': positionIdx,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
-        exchange.create_order(symbol, 'limit', close_side, quantities[0], round(tp_prices[0], 4), {
-            'positionIdx': positionIdx,
-            'reduceOnly': True
-        })
+        # Execute orders for all 4 portions
+        for i in range(4):
+            exchange.create_order(
+                symbol,
+                'market',
+                signal,
+                quantities[i],
+                None,
+                {
+                    'positionIdx': positionIdx,
+                    'stopLoss': round(sl_price, 4),
+                    'slTriggerBy': 'LastPrice'
+                }
+            )
+            if i < 3:  # Add TP for first 3 portions
+                exchange.create_order(
+                    symbol,
+                    'limit',
+                    close_side,
+                    quantities[i],
+                    round(tp_prices[i], 4),
+                    {
+                        'positionIdx': positionIdx,
+                        'reduceOnly': True
+                    }
+                )
 
-        # TP2 (1:3)
-        exchange.create_order(symbol, 'market', signal, quantities[1], None, {
-            'positionIdx': positionIdx,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
-        exchange.create_order(symbol, 'limit', close_side, quantities[1], round(tp_prices[1], 4), {
-            'positionIdx': positionIdx,
-            'reduceOnly': True
-        })
-
-        # TP3 (1:4)
-        exchange.create_order(symbol, 'market', signal, quantities[2], None, {
-            'positionIdx': positionIdx,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
-        exchange.create_order(symbol, 'limit', close_side, quantities[2], round(tp_prices[2], 4), {
-            'positionIdx': positionIdx,
-            'reduceOnly': True
-        })
-
-        # Runner (10%)
-        exchange.create_order(symbol, 'market', signal, quantities[3], None, {
-            'positionIdx': positionIdx,
-            'stopLoss': round(sl_price, 4),
-            'slTriggerBy': 'LastPrice'
-        })
-
-        # Update state
+        # Update state and log
         if signal == 'buy':
             is_long_open = True
         else:
             is_short_open = True
         last_signal = signal
         
-        print(f"✅ Executed {signal.upper()} order with 3TPs+Runner")
-        print(f"TP1: {round(tp_prices[0], 4)} (1:2, {quantities[0]} contracts)")
-        print(f"TP2: {round(tp_prices[1], 4)} (1:3, {quantities[1]} contracts)")
-        print(f"TP3: {round(tp_prices[2], 4)} (1:4, {quantities[2]} contracts)") 
-        print(f"Runner: No TP ({quantities[3]} contracts)")
+        trade_history.append({
+            'time': datetime.datetime.now(),
+            'signal': signal,
+            'entry': current_price,
+            'size': quantity,
+            'sl': sl_price,
+            'tps': tp_prices
+        })
         
-        threading.Thread(target=monitor_position, args=(signal,)).start()
+        print(f"\n✅ Executed {signal.upper()} Order")
+        print(f"Entry: {current_price:.4f} | SL: {sl_price:.4f}")
+        print("Take Profits:")
+        print(f"  TP1: {tp_prices[0]:.4f} (1:2, {quantities[0]} contracts)")
+        print(f"  TP2: {tp_prices[1]:.4f} (1:3, {quantities[1]} contracts)")
+        print(f"  TP3: {tp_prices[2]:.4f} (1:4, {quantities[2]} contracts)")
+        print(f"  Runner: {quantities[3]} contracts (No TP)")
+        
+        threading.Thread(target=log_pnl, args=(signal,)).start()
 
     except Exception as e:
         print(f"[Order Error]: {str(e)}")
@@ -330,29 +319,43 @@ def run_bot():
         df = calculate_ema(df, ema_short_period, ema_long_period)
         df = calculate_rsi(df)
         df = calculate_atr(df)
+        df = calculate_adx(df, adx_period)
 
         signal = get_ema_signal(df)
         if not signal:
-            print("ANALYSING THE MARKET")
+            print("No crossover signal")
             return
 
-        if enable_ema50_filter:
-            price = df['close'].iloc[-1]
-            ema_50 = df['ema_50'].iloc[-1]
-            if signal == 'buy' and price < ema_50:
-                print("Skipping long because market is bearish (price < EMA50)")
+        # ADX Filter
+        if enable_adx_filter:
+            current_adx = df['adx'].iloc[-1]
+            plus_di = df['+di'].iloc[-1]
+            minus_di = df['-di'].iloc[-1]
+            
+            print(f"\nADX: {current_adx:.2f} (+DI: {plus_di:.2f}, -DI: {minus_di:.2f})")
+            
+            if current_adx < adx_threshold:
+                print(f"ADX below threshold ({adx_threshold}), skipping trade")
                 return
-            elif signal == 'sell' and price > ema_50:
-                print("Skipping short because market is bullish (price > EMA50)")
+                
+            if (signal == 'buy' and plus_di < minus_di) or (signal == 'sell' and minus_di < plus_di):
+                print("Directional momentum weak, skipping")
                 return
 
-        average_price = df['close'].iloc[-14:].mean()
-        dynamic_atr_threshold = average_price * 0.001
-        if df['atr'].iloc[-1] < dynamic_atr_threshold:
-            print(f"Low ATR ({df['atr'].iloc[-1]:.6f}) below threshold ({dynamic_atr_threshold:.6f}) - skipping.")
+        # Other filters
+        if enable_ema50_filter and (
+            (signal == 'buy' and df['close'].iloc[-1] < df['ema_50'].iloc[-1]) or
+            (signal == 'sell' and df['close'].iloc[-1] > df['ema_50'].iloc[-1])
+        ):
+            print("EMA50 filter triggered")
             return
 
-        print(f"Confirmed signal: {signal.upper()}")
+        avg_price = df['close'].iloc[-14:].mean()
+        if df['atr'].iloc[-1] < avg_price * 0.001:
+            print("Low volatility (ATR filter)")
+            return
+
+        print(f"Confirmed {signal.upper()} signal with strong trend")
         place_order(signal, df)
 
     except Exception as e:
@@ -361,19 +364,23 @@ def run_bot():
 
 # ====== MAIN LOOP ======
 if __name__ == "__main__":
-    print("=== Starting Trading Bot ===")
-    print(f"Symbol: {symbol}")
-    print(f"Timeframe: {timeframe}")
-    print(f"Strategy: EMA{ema_short_period}/EMA{ema_long_period} Crossover")
-    print(f"Risk Management: 3TPs (1:2,1:3,1:4) + 10% Runner")
+    print("=== Trend-Following Bot ===")
+    print(f"Symbol: {symbol} | TF: {timeframe}")
+    print(f"Strategy: EMA{ema_short_period}/{ema_long_period} Crossover")
+    print(f"Risk: 3TPs (1:2,1:3,1:4) + 10% Runner")
+    print(f"ADX Filter: {'ON' if enable_adx_filter else 'OFF'} (Threshold: {adx_threshold})")
     
-    # Initial position sync
     sync_position_state()
     
     while True:
         try:
             run_bot()
-        except Exception as e:
-            print(f"💣 Main loop crash: {str(e)}")
+            time.sleep(60)
+        except KeyboardInterrupt:
+            print("\nShutting down gracefully...")
             force_close_all_positions()
-        time.sleep(60)
+            break
+        except Exception as e:
+            print(f"💣 Critical error: {str(e)}")
+            force_close_all_positions()
+            time.sleep(60)
