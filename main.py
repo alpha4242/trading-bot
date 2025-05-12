@@ -59,8 +59,8 @@ def calculate_adx(df, period=14):
     
     # Smoothing (Wilder's method)
     df['atr'] = df['tr'].rolling(window=period).mean()
-    df['+di'] = 100 * (df['+dm'].rolling(window=period).mean() / df['atr'])  # Fixed missing parenthesis
-    df['-di'] = 100 * (df['-dm'].rolling(window=period).mean() / df['atr'])  # Fixed missing parenthesis
+    df['+di'] = 100 * (df['+dm'].rolling(window=period).mean() / df['atr'])
+    df['-di'] = 100 * (df['-dm'].rolling(window=period).mean() / df['atr'])
     
     # Calculate DX and ADX
     df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
@@ -294,11 +294,15 @@ def place_order(signal, df):
             'entry': current_price,
             'size': quantity,
             'sl': sl_price,
-            'tps': tp_prices
+            'tps': tp_prices,
+            'adx': df['adx'].iloc[-1],
+            '+di': df['+di'].iloc[-1],
+            '-di': df['-di'].iloc[-1]
         })
         
         print(f"\n✅ Executed {signal.upper()} Order")
         print(f"Entry: {current_price:.4f} | SL: {sl_price:.4f}")
+        print(f"ADX: {df['adx'].iloc[-1]:.2f} (+DI: {df['+di'].iloc[-1]:.2f}, -DI: {df['-di'].iloc[-1]:.2f})")
         print("Take Profits:")
         print(f"  TP1: {tp_prices[0]:.4f} (1:2, {quantities[0]} contracts)")
         print(f"  TP2: {tp_prices[1]:.4f} (1:3, {quantities[1]} contracts)")
@@ -321,6 +325,15 @@ def run_bot():
         df = calculate_atr(df)
         df = calculate_adx(df, adx_period)
 
+        # Print ADX values in logs
+        current_adx = df['adx'].iloc[-1]
+        plus_di = df['+di'].iloc[-1]
+        minus_di = df['-di'].iloc[-1]
+        
+        print(f"\nCurrent ADX: {current_adx:.2f}")
+        print(f"+DI: {plus_di:.2f} | -DI: {minus_di:.2f}")
+        print(f"Trend Strength: {'Strong' if current_adx >= adx_threshold else 'Weak'}")
+
         signal = get_ema_signal(df)
         if not signal:
             print("No crossover signal")
@@ -328,18 +341,12 @@ def run_bot():
 
         # ADX Filter
         if enable_adx_filter:
-            current_adx = df['adx'].iloc[-1]
-            plus_di = df['+di'].iloc[-1]
-            minus_di = df['-di'].iloc[-1]
-            
-            print(f"\nADX: {current_adx:.2f} (+DI: {plus_di:.2f}, -DI: {minus_di:.2f})")
-            
             if current_adx < adx_threshold:
-                print(f"ADX below threshold ({adx_threshold}), skipping trade")
+                print(f"ADX {current_adx:.2f} < threshold {adx_threshold} - Skipping trade")
                 return
                 
             if (signal == 'buy' and plus_di < minus_di) or (signal == 'sell' and minus_di < plus_di):
-                print("Directional momentum weak, skipping")
+                print("Directional momentum weak, skipping trade")
                 return
 
         # Other filters
@@ -355,7 +362,7 @@ def run_bot():
             print("Low volatility (ATR filter)")
             return
 
-        print(f"Confirmed {signal.upper()} signal with strong trend")
+        print(f"Confirmed {signal.upper()} signal with ADX {current_adx:.2f}")
         place_order(signal, df)
 
     except Exception as e:
