@@ -20,7 +20,7 @@ stoploss_lookback = 4  # For SL calculation
 rsi_diff_threshold = 8
 enable_ema50_filter = True
 enable_rsi_exit = False
-enable_adx_filter = True  # ADX control switch
+enable_adx_filter = False  # ADX control switch
 adx_threshold = 20  # Minimum ADX value for valid trend
 adx_period = 14  # ADX calculation period
 
