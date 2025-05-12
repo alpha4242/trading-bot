@@ -59,8 +59,8 @@ def calculate_adx(df, period=14):
     
     # Smoothing (Wilder's method)
     df['atr'] = df['tr'].rolling(window=period).mean()
-    df['+di'] = 100 * (df['+dm'].rolling(window=period).mean() / df['atr']
-    df['-di'] = 100 * (df['-dm'].rolling(window=period).mean() / df['atr']
+    df['+di'] = 100 * (df['+dm'].rolling(window=period).mean() / df['atr'])  # Fixed missing parenthesis
+    df['-di'] = 100 * (df['-dm'].rolling(window=period).mean() / df['atr'])  # Fixed missing parenthesis
     
     # Calculate DX and ADX
     df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
