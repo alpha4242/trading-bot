@@ -228,7 +228,7 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
-def monitor_and_adjust_sl(position_type, entry_price, initial_sl, tp_prices, quantities):
+def monitor_and_adjust_sl(position_type, entry_price, initial_sl, rr_1_1_price, tp_prices, quantities):
     """Monitor position and adjust SL according to RR milestones"""
     print(f"\n=== SL Monitoring ({position_type.upper()}) ===")
     sl_levels = {
@@ -266,39 +266,39 @@ def monitor_and_adjust_sl(position_type, entry_price, initial_sl, tp_prices, qua
             
             # Check for SL adjustment triggers
             if position_type == 'buy':
-                # 1:1 RR - Move SL to 0.5% below entry
-                if current_price >= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_1']:
+                # 1:1 RR - Move SL to 0.5% below entry (only for calculation)
+                if current_price >= rr_1_1_price and trade_history[-1]['sl'] != sl_levels['1_1']:
                     print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
                     update_sl(position_type, sl_levels['1_1'], quantities[3])
                     trade_history[-1]['sl'] = sl_levels['1_1']
                 
-                # 1:2 RR - Move SL to entry
-                elif current_price >= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_2']:
+                # 1:2 RR - Move SL to entry (actual TP1 at 1:2 RR)
+                elif current_price >= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_2']:
                     print(f"🔥 1:2 RR reached - Moving SL to breakeven {sl_levels['1_2']:.4f}")
                     update_sl(position_type, sl_levels['1_2'], quantities[3])
                     trade_history[-1]['sl'] = sl_levels['1_2']
                 
-                # 1:3 RR - Move SL to 0.5% above entry
-                elif current_price >= tp_prices[2] and trade_history[-1]['sl'] != sl_levels['1_3']:
+                # 1:3 RR - Move SL to 0.5% above entry (actual TP2 at 1:3 RR)
+                elif current_price >= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_3']:
                     print(f"🔥 1:3 RR reached - Moving SL to {sl_levels['1_3']:.4f}")
                     update_sl(position_type, sl_levels['1_3'], quantities[3])
                     trade_history[-1]['sl'] = sl_levels['1_3']
             
             else:  # Sell position
-                # 1:1 RR - Move SL to 0.5% above entry
-                if current_price <= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_1']:
+                # 1:1 RR - Move SL to 0.5% above entry (only for calculation)
+                if current_price <= rr_1_1_price and trade_history[-1]['sl'] != sl_levels['1_1']:
                     print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
                     update_sl(position_type, sl_levels['1_1'], quantities[3])
                     trade_history[-1]['sl'] = sl_levels['1_1']
                 
-                # 1:2 RR - Move SL to entry
-                elif current_price <= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_2']:
+                # 1:2 RR - Move SL to entry (actual TP1 at 1:2 RR)
+                elif current_price <= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_2']:
                     print(f"🔥 1:2 RR reached - Moving SL to breakeven {sl_levels['1_2']:.4f}")
                     update_sl(position_type, sl_levels['1_2'], quantities[3])
                     trade_history[-1]['sl'] = sl_levels['1_2']
                 
-                # 1:3 RR - Move SL to 0.5% below entry
-                elif current_price <= tp_prices[2] and trade_history[-1]['sl'] != sl_levels['1_3']:
+                # 1:3 RR - Move SL to 0.5% below entry (actual TP2 at 1:3 RR)
+                elif current_price <= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_3']:
                     print(f"🔥 1:3 RR reached - Moving SL to {sl_levels['1_3']:.4f}")
                     update_sl(position_type, sl_levels['1_3'], quantities[3])
                     trade_history[-1]['sl'] = sl_levels['1_3']
@@ -358,11 +358,17 @@ def place_order(signal, df):
     if signal == 'buy':
         sl_price = recent_candles['low'].min()
         risk = current_price - sl_price
-        tp_prices = [current_price + r * risk for r in [1, 2, 3]]  # 1:1, 1:2, 1:3 RR
+        # 1:1 RR is only for SL trail calculation
+        rr_1_1_price = current_price + risk  # Not used for actual TP
+        # Actual TP levels
+        tp_prices = [current_price + r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
     else:
         sl_price = recent_candles['high'].max()
         risk = sl_price - current_price
-        tp_prices = [current_price - r * risk for r in [1, 2, 3]]  # 1:1, 1:2, 1:3 RR
+        # 1:1 RR is only for SL trail calculation
+        rr_1_1_price = current_price - risk  # Not used for actual TP
+        # Actual TP levels
+        tp_prices = [current_price - r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
 
     quantities = [
         round(quantity * p, 3) for p in [0.40, 0.30, 0.20]  # 40%, 30%, 20%
@@ -386,7 +392,7 @@ def place_order(signal, df):
                     'slTriggerBy': 'LastPrice'
                 }
             )
-            if i < 3:  # Add TP for first 3 portions
+            if i < 3:  # Add TP for first 3 portions (1:2, 1:3, 1:4)
                 exchange.create_order(
                     symbol,
                     'limit',
@@ -412,7 +418,8 @@ def place_order(signal, df):
             'entry': current_price,
             'size': quantity,
             'sl': sl_price,
-            'tps': tp_prices,
+            'rr_1_1': rr_1_1_price,  # Store 1:1 RR price for SL trail
+            'tps': tp_prices,  # Actual TP levels (1:2, 1:3, 1:4)
             'adx': df['adx'].iloc[-1],
             '+di': df['+di'].iloc[-1],
             '-di': df['-di'].iloc[-1]
@@ -422,15 +429,15 @@ def place_order(signal, df):
         print(f"Entry: {current_price:.4f} | SL: {sl_price:.4f}")
         print(f"ADX: {df['adx'].iloc[-1]:.4f} (+DI: {df['+di'].iloc[-1]:.4f}, -DI: {df['-di'].iloc[-1]:.4f})")
         print("Take Profits:")
-        print(f"  TP1: {tp_prices[0]:.4f} (1:1, {quantities[0]} contracts)")
-        print(f"  TP2: {tp_prices[1]:.4f} (1:2, {quantities[1]} contracts)")
-        print(f"  TP3: {tp_prices[2]:.4f} (1:3, {quantities[2]} contracts)")
+        print(f"  TP1: {tp_prices[0]:.4f} (1:2, {quantities[0]} contracts)")
+        print(f"  TP2: {tp_prices[1]:.4f} (1:3, {quantities[1]} contracts)")
+        print(f"  TP3: {tp_prices[2]:.4f} (1:4, {quantities[2]} contracts)")
         print(f"  Runner: {quantities[3]} contracts (No TP)")
         
-        # Start SL monitoring thread
+        # Start SL monitoring thread with rr_1_1_price for trail calculation
         threading.Thread(
             target=monitor_and_adjust_sl,
-            args=(signal, current_price, sl_price, tp_prices, quantities)
+            args=(signal, current_price, sl_price, rr_1_1_price, tp_prices, quantities)
         ).start()
 
     except Exception as e:
