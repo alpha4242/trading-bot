@@ -228,6 +228,32 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
+def update_sl(position_type, new_sl, runner_size):
+    """Update stop loss for the runner position"""
+    try:
+        # Cancel existing SL orders
+        exchange.cancel_all_orders(symbol)
+        
+        # Update SL for runner position
+        exchange.create_order(
+            symbol,
+            'market',
+            position_type,
+            0,  # Zero quantity for SL update only
+            None,
+            {
+                'positionIdx': 1 if position_type == 'buy' else 2,
+                'stopLoss': round(new_sl, 4),
+                'slTriggerBy': 'LastPrice'
+            }
+        )
+        
+        print(f"✅ Updated SL to {new_sl:.4f} for runner position ({runner_size} contracts)")
+        
+    except Exception as e:
+        print(f"[SL Update Error]: {str(e)}")
+        force_close_all_positions()
+
 def monitor_and_adjust_sl(position_type, entry_price, initial_sl, rr_1_1_price, tp_prices, quantities):
     """Monitor position and adjust SL according to RR milestones"""
     print(f"\n=== SL Monitoring ({position_type.upper()}) ===")
@@ -266,7 +292,7 @@ def monitor_and_adjust_sl(position_type, entry_price, initial_sl, rr_1_1_price, 
             
             # Check for SL adjustment triggers
             if position_type == 'buy':
-                # 1:1 RR - Move SL to 0.5% below entry (only for calculation)
+                # 1:1 RR - Move SL to 0.5% below entry (calculation only)
                 if current_price >= rr_1_1_price and trade_history[-1]['sl'] != sl_levels['1_1']:
                     print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
                     update_sl(position_type, sl_levels['1_1'], quantities[3])
@@ -285,7 +311,7 @@ def monitor_and_adjust_sl(position_type, entry_price, initial_sl, rr_1_1_price, 
                     trade_history[-1]['sl'] = sl_levels['1_3']
             
             else:  # Sell position
-                # 1:1 RR - Move SL to 0.5% above entry (only for calculation)
+                # 1:1 RR - Move SL to 0.5% above entry (calculation only)
                 if current_price <= rr_1_1_price and trade_history[-1]['sl'] != sl_levels['1_1']:
                     print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
                     update_sl(position_type, sl_levels['1_1'], quantities[3])
@@ -308,32 +334,6 @@ def monitor_and_adjust_sl(position_type, entry_price, initial_sl, rr_1_1_price, 
         except Exception as e:
             print(f"[SL Monitoring Error]: {str(e)}")
             break
-
-def update_sl(position_type, new_sl, runner_size):
-    """Update stop loss for the runner position"""
-    try:
-        # Cancel existing SL orders
-        exchange.cancel_all_orders(symbol)
-        
-        # Update SL for runner position
-        exchange.create_order(
-            symbol,
-            'market',
-            position_type,
-            0,  # Zero quantity for SL update only
-            None,
-            {
-                'positionIdx': 1 if position_type == 'buy' else 2,
-                'stopLoss': round(new_sl, 4),
-                'slTriggerBy': 'LastPrice'
-            }
-        )
-        
-        print(f"✅ Updated SL to {new_sl:.4f} for runner position ({runner_size} contracts)")
-        
-    except Exception as e:
-        print(f"[SL Update Error]: {str(e)}")
-        force_close_all_positions()
 
 def place_order(signal, df):
     global is_long_open, is_short_open, last_signal, trade_history
@@ -360,15 +360,15 @@ def place_order(signal, df):
         risk = current_price - sl_price
         # 1:1 RR is only for SL trail calculation
         rr_1_1_price = current_price + risk  # Not used for actual TP
-        # Actual TP levels
-        tp_prices = [current_price + r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
+        # Actual TP levels (1:2, 1:3, 1:4 RR)
+        tp_prices = [current_price + r * risk for r in [2, 3, 4]]
     else:
         sl_price = recent_candles['high'].max()
         risk = sl_price - current_price
         # 1:1 RR is only for SL trail calculation
         rr_1_1_price = current_price - risk  # Not used for actual TP
-        # Actual TP levels
-        tp_prices = [current_price - r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
+        # Actual TP levels (1:2, 1:3, 1:4 RR)
+        tp_prices = [current_price - r * risk for r in [2, 3, 4]]
 
     quantities = [
         round(quantity * p, 3) for p in [0.40, 0.30, 0.20]  # 40%, 30%, 20%
@@ -392,7 +392,7 @@ def place_order(signal, df):
                     'slTriggerBy': 'LastPrice'
                 }
             )
-            if i < 3:  # Add TP for first 3 portions (1:2, 1:3, 1:4)
+            if i < 3:  # Add TP for first 3 portions (1:2, 1:3, 1:4 RR)
                 exchange.create_order(
                     symbol,
                     'limit',
@@ -502,7 +502,7 @@ if __name__ == "__main__":
     print("=== Trend-Following Bot ===")
     print(f"Symbol: {symbol} | TF: {timeframe}")
     print(f"Strategy: EMA{ema_short_period}/{ema_long_period} Crossover")
-    print(f"Risk: 3TPs (1:1,1:2,1:3) + 10% Runner with Trailing SL")
+    print(f"Risk: 3TPs (1:2,1:3,1:4) + 10% Runner with Trailing SL")
     print(f"ADX Filter: {'ON' if enable_adx_filter else 'OFF'} (Threshold: {adx_threshold})")
     
     sync_position_state()
