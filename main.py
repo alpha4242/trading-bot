@@ -44,11 +44,7 @@ trade_history = []  # For tracking performance
 
 # ====== TECHNICAL INDICATORS ======
 def calculate_adx(df, period=14):
-    """
-    Calculate ADX, +DI, -DI according to Bybit's implementation
-    Returns DataFrame with 'adx', '+di', '-di' columns added
-    """
-    # Calculate True Range
+    """Calculate ADX, +DI, -DI according to Bybit's implementation"""
     df['prev_close'] = df['close'].shift(1)
     df['tr'] = df[['high', 'low', 'prev_close']].apply(
         lambda x: max(x['high'] - x['low'], 
@@ -81,19 +77,17 @@ def calculate_adx(df, period=14):
             adjust=False
         ).mean()
     
-    # Calculate smoothed TR, +DM, -DM
+    # Calculate smoothed values
     df['smoothed_tr'] = wilder_smooth(df['tr'], period)
     df['smoothed_+dm'] = wilder_smooth(df['+dm'], period)
     df['smoothed_-dm'] = wilder_smooth(df['-dm'], period)
     
-    # Calculate +DI and -DI
+    # Calculate DI values
     df['+di'] = 100 * (df['smoothed_+dm'] / df['smoothed_tr'])
     df['-di'] = 100 * (df['smoothed_-dm'] / df['smoothed_tr'])
     
-    # Calculate DX
+    # Calculate DX and ADX
     df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
-    
-    # Calculate ADX
     df['adx'] = wilder_smooth(df['dx'], period)
     
     # Clean up intermediate columns
@@ -234,9 +228,25 @@ def get_ema_signal(df):
         return 'sell'
     return None
 
-def log_pnl(position_type):
-    """Real-time PNL monitoring"""
-    print(f"\n=== PNL Monitoring ({position_type.upper()}) ===")
+def monitor_and_adjust_sl(position_type, entry_price, initial_sl, tp_prices, quantities):
+    """Monitor position and adjust SL according to RR milestones"""
+    print(f"\n=== SL Monitoring ({position_type.upper()}) ===")
+    sl_levels = {
+        '1_1': None,  # Will be set to 0.5% when 1:1 RR is hit
+        '1_2': None,  # Will be set to entry when 1:2 RR is hit
+        '1_3': None   # Will be set to 0.5% profit when 1:3 RR is hit
+    }
+    
+    # Calculate SL levels based on position type
+    if position_type == 'buy':
+        sl_levels['1_1'] = entry_price + (entry_price - initial_sl) * 0.5  # 0.5% below entry
+        sl_levels['1_2'] = entry_price  # Breakeven
+        sl_levels['1_3'] = entry_price + (entry_price - initial_sl) * 0.5  # 0.5% above entry
+    else:
+        sl_levels['1_1'] = entry_price - (initial_sl - entry_price) * 0.5  # 0.5% above entry
+        sl_levels['1_2'] = entry_price  # Breakeven
+        sl_levels['1_3'] = entry_price - (initial_sl - entry_price) * 0.5  # 0.5% below entry
+    
     while True:
         try:
             positions = exchange.fetch_positions([symbol])
@@ -247,15 +257,83 @@ def log_pnl(position_type):
             if not pos:
                 break
                 
+            current_price = float(pos['markPrice'])
             print(
                 f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-                f"Unrealized PNL: ${float(pos['unrealizedPnl']):.2f} | "
-                f"Entry: {float(pos['entryPrice']):.4f}"
+                f"Price: {current_price:.4f} | "
+                f"Unrealized PNL: ${float(pos['unrealizedPnl']):.2f}"
             )
+            
+            # Check for SL adjustment triggers
+            if position_type == 'buy':
+                # 1:1 RR - Move SL to 0.5% below entry
+                if current_price >= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_1']:
+                    print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
+                    update_sl(position_type, sl_levels['1_1'], quantities[3])
+                    trade_history[-1]['sl'] = sl_levels['1_1']
+                
+                # 1:2 RR - Move SL to entry
+                elif current_price >= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_2']:
+                    print(f"🔥 1:2 RR reached - Moving SL to breakeven {sl_levels['1_2']:.4f}")
+                    update_sl(position_type, sl_levels['1_2'], quantities[3])
+                    trade_history[-1]['sl'] = sl_levels['1_2']
+                
+                # 1:3 RR - Move SL to 0.5% above entry
+                elif current_price >= tp_prices[2] and trade_history[-1]['sl'] != sl_levels['1_3']:
+                    print(f"🔥 1:3 RR reached - Moving SL to {sl_levels['1_3']:.4f}")
+                    update_sl(position_type, sl_levels['1_3'], quantities[3])
+                    trade_history[-1]['sl'] = sl_levels['1_3']
+            
+            else:  # Sell position
+                # 1:1 RR - Move SL to 0.5% above entry
+                if current_price <= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_1']:
+                    print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
+                    update_sl(position_type, sl_levels['1_1'], quantities[3])
+                    trade_history[-1]['sl'] = sl_levels['1_1']
+                
+                # 1:2 RR - Move SL to entry
+                elif current_price <= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_2']:
+                    print(f"🔥 1:2 RR reached - Moving SL to breakeven {sl_levels['1_2']:.4f}")
+                    update_sl(position_type, sl_levels['1_2'], quantities[3])
+                    trade_history[-1]['sl'] = sl_levels['1_2']
+                
+                # 1:3 RR - Move SL to 0.5% below entry
+                elif current_price <= tp_prices[2] and trade_history[-1]['sl'] != sl_levels['1_3']:
+                    print(f"🔥 1:3 RR reached - Moving SL to {sl_levels['1_3']:.4f}")
+                    update_sl(position_type, sl_levels['1_3'], quantities[3])
+                    trade_history[-1]['sl'] = sl_levels['1_3']
+            
             time.sleep(15)
+            
         except Exception as e:
-            print(f"[PNL Error]: {str(e)}")
+            print(f"[SL Monitoring Error]: {str(e)}")
             break
+
+def update_sl(position_type, new_sl, runner_size):
+    """Update stop loss for the runner position"""
+    try:
+        # Cancel existing SL orders
+        exchange.cancel_all_orders(symbol)
+        
+        # Update SL for runner position
+        exchange.create_order(
+            symbol,
+            'market',
+            position_type,
+            0,  # Zero quantity for SL update only
+            None,
+            {
+                'positionIdx': 1 if position_type == 'buy' else 2,
+                'stopLoss': round(new_sl, 4),
+                'slTriggerBy': 'LastPrice'
+            }
+        )
+        
+        print(f"✅ Updated SL to {new_sl:.4f} for runner position ({runner_size} contracts)")
+        
+    except Exception as e:
+        print(f"[SL Update Error]: {str(e)}")
+        force_close_all_positions()
 
 def place_order(signal, df):
     global is_long_open, is_short_open, last_signal, trade_history
@@ -280,11 +358,11 @@ def place_order(signal, df):
     if signal == 'buy':
         sl_price = recent_candles['low'].min()
         risk = current_price - sl_price
-        tp_prices = [current_price + r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
+        tp_prices = [current_price + r * risk for r in [1, 2, 3]]  # 1:1, 1:2, 1:3 RR
     else:
         sl_price = recent_candles['high'].max()
         risk = sl_price - current_price
-        tp_prices = [current_price - r * risk for r in [2, 3, 4]]
+        tp_prices = [current_price - r * risk for r in [1, 2, 3]]  # 1:1, 1:2, 1:3 RR
 
     quantities = [
         round(quantity * p, 3) for p in [0.40, 0.30, 0.20]  # 40%, 30%, 20%
@@ -344,12 +422,16 @@ def place_order(signal, df):
         print(f"Entry: {current_price:.4f} | SL: {sl_price:.4f}")
         print(f"ADX: {df['adx'].iloc[-1]:.4f} (+DI: {df['+di'].iloc[-1]:.4f}, -DI: {df['-di'].iloc[-1]:.4f})")
         print("Take Profits:")
-        print(f"  TP1: {tp_prices[0]:.4f} (1:2, {quantities[0]} contracts)")
-        print(f"  TP2: {tp_prices[1]:.4f} (1:3, {quantities[1]} contracts)")
-        print(f"  TP3: {tp_prices[2]:.4f} (1:4, {quantities[2]} contracts)")
+        print(f"  TP1: {tp_prices[0]:.4f} (1:1, {quantities[0]} contracts)")
+        print(f"  TP2: {tp_prices[1]:.4f} (1:2, {quantities[1]} contracts)")
+        print(f"  TP3: {tp_prices[2]:.4f} (1:3, {quantities[2]} contracts)")
         print(f"  Runner: {quantities[3]} contracts (No TP)")
         
-        threading.Thread(target=log_pnl, args=(signal,)).start()
+        # Start SL monitoring thread
+        threading.Thread(
+            target=monitor_and_adjust_sl,
+            args=(signal, current_price, sl_price, tp_prices, quantities)
+        ).start()
 
     except Exception as e:
         print(f"[Order Error]: {str(e)}")
@@ -413,7 +495,7 @@ if __name__ == "__main__":
     print("=== Trend-Following Bot ===")
     print(f"Symbol: {symbol} | TF: {timeframe}")
     print(f"Strategy: EMA{ema_short_period}/{ema_long_period} Crossover")
-    print(f"Risk: 3TPs (1:2,1:3,1:4) + 10% Runner")
+    print(f"Risk: 3TPs (1:1,1:2,1:3) + 10% Runner with Trailing SL")
     print(f"ADX Filter: {'ON' if enable_adx_filter else 'OFF'} (Threshold: {adx_threshold})")
     
     sync_position_state()
