@@ -399,7 +399,15 @@ def place_order(signal, df):
     except Exception as e:
         print(f"[Order Error]: {str(e)}")
         force_close_all_positions()
-
+        
+def set_leverage(symbol, leverage):
+    try:
+        exchange.set_leverage(leverage, symbol)
+        print(f"Leverage set to {leverage}x")
+    except ccxt.BaseError as e:
+        if "leverage not modified" not in str(e).lower():
+            print(f"[Leverage Error]: {str(e)}")
+            
 def run_bot():
     print(f"\nRunning bot at {datetime.datetime.now()}")
     try:
