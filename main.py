@@ -267,7 +267,24 @@ def place_order(signal, df):
     if signal == last_signal:
         return
 
-    # Close opposite position
+    # EMA50 Filter: Handle opposite signals while still above/below EMA50
+    if enable_ema50_filter:
+        # If long is open and we get a sell signal while above EMA50
+        if is_long_open and signal == 'sell' and current_price > df['ema_50'].iloc[-1]:
+            print("EMA50 Filter: Opposite signal received while above 50 EMA - Closing long position only")
+            if close_position(1):  # Close long position (positionIdx=1)
+                is_long_open = False
+                last_signal = None
+            return
+        # If short is open and we get a buy signal while below EMA50
+        elif is_short_open and signal == 'buy' and current_price < df['ema_50'].iloc[-1]:
+            print("EMA50 Filter: Opposite signal received while below 50 EMA - Closing short position only")
+            if close_position(2):  # Close short position (positionIdx=2)
+                is_short_open = False
+                last_signal = None
+            return
+
+    # Original position closing logic for non-filtered cases
     if (signal == 'buy' and is_short_open) or (signal == 'sell' and is_long_open):
         position_to_close = 2 if is_short_open else 1
         if not close_position(position_to_close):
@@ -388,13 +405,12 @@ def run_bot():
                 print("Directional momentum weak, skipping trade")
                 return
 
-        # Other filters
-        if enable_ema50_filter and (
-            (signal == 'buy' and df['close'].iloc[-1] < df['ema_50'].iloc[-1]) or
-            (signal == 'sell' and df['close'].iloc[-1] > df['ema_50'].iloc[-1])
-        ):
-            print("EMA50 filter triggered")
-            return
+        # EMA50 Filter
+        if enable_ema50_filter:
+            if (signal == 'buy' and df['close'].iloc[-1] < df['ema_50'].iloc[-1]) or \
+               (signal == 'sell' and df['close'].iloc[-1] > df['ema_50'].iloc[-1]):
+                print("EMA50 filter triggered - Not taking trade")
+                return
 
         avg_price = df['close'].iloc[-14:].mean()
         if df['atr'].iloc[-1] < avg_price * 0.001:
@@ -415,6 +431,7 @@ if __name__ == "__main__":
     print(f"Strategy: EMA{ema_short_period}/{ema_long_period} Crossover")
     print(f"Risk: 3TPs (1:2,1:3,1:4) + 10% Runner")
     print(f"ADX Filter: {'ON' if enable_adx_filter else 'OFF'} (Threshold: {adx_threshold})")
+    print(f"EMA50 Filter: {'ON' if enable_ema50_filter else 'OFF'}")
     
     sync_position_state()
     
