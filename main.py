@@ -88,7 +88,13 @@ def calculate_ema(df, short, long):
     df['ema_long'] = df['close'].ewm(span=long, adjust=False).mean()
     df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
     return df
-
+    
+def fetch_ohlcv(symbol, timeframe, limit=200):
+    data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+    
 def calculate_rsi(df, period=14):
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0)
