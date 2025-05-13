@@ -10,21 +10,21 @@ import os
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
-symbol = 'PNUTUSDT'  # Corrected symbol
+symbol = 'PNUTUSDT'
 timeframe = '1m'
 ema_short_period = 9
 ema_long_period = 21
-quantity = 35
+quantity = 35  # Total position size
 leverage = 10
-stoploss_lookback = 4
+stoploss_lookback = 4  # For SL calculation
 rsi_diff_threshold = 8
 enable_ema50_filter = True
 enable_rsi_exit = False
-enable_adx_filter = False
-adx_threshold = 20
-adx_period = 14
+enable_adx_filter = False  # ADX control switch
+adx_threshold = 20  # Minimum ADX value for valid trend
+adx_period = 14  # ADX calculation period
 
-# ====== EXCHANGE INITIALIZATION ======
+# ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
     'apiKey': API_KEY,
     'secret': API_SECRET,
@@ -40,10 +40,15 @@ exchange.load_markets()
 is_long_open = False
 is_short_open = False
 last_signal = None
-trade_history = []
+trade_history = []  # For tracking performance
 
 # ====== TECHNICAL INDICATORS ======
 def calculate_adx(df, period=14):
+    """
+    Calculate ADX, +DI, -DI according to Bybit's implementation
+    Returns DataFrame with 'adx', '+di', '-di' columns added
+    """
+    # Calculate True Range
     df['prev_close'] = df['close'].shift(1)
     df['tr'] = df[['high', 'low', 'prev_close']].apply(
         lambda x: max(x['high'] - x['low'], 
@@ -51,23 +56,54 @@ def calculate_adx(df, period=14):
                      abs(x['low'] - x['prev_close'])),
         axis=1
     )
+    
+    # Calculate Directional Movements
     df['up_move'] = df['high'] - df['high'].shift(1)
     df['down_move'] = df['low'].shift(1) - df['low']
-    df['+dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
-    df['-dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
     
+    # Calculate +DM and -DM
+    df['+dm'] = np.where(
+        (df['up_move'] > df['down_move']) & (df['up_move'] > 0),
+        df['up_move'],
+        0
+    )
+    df['-dm'] = np.where(
+        (df['down_move'] > df['up_move']) & (df['down_move'] > 0),
+        df['down_move'],
+        0
+    )
+    
+    # Wilder's smoothing (RMA)
     def wilder_smooth(series, window):
-        return series.ewm(alpha=1.0/window, min_periods=window, adjust=False).mean()
+        return series.ewm(
+            alpha=1.0/window, 
+            min_periods=window, 
+            adjust=False
+        ).mean()
     
+    # Calculate smoothed TR, +DM, -DM
     df['smoothed_tr'] = wilder_smooth(df['tr'], period)
     df['smoothed_+dm'] = wilder_smooth(df['+dm'], period)
     df['smoothed_-dm'] = wilder_smooth(df['-dm'], period)
+    
+    # Calculate +DI and -DI
     df['+di'] = 100 * (df['smoothed_+dm'] / df['smoothed_tr'])
     df['-di'] = 100 * (df['smoothed_-dm'] / df['smoothed_tr'])
+    
+    # Calculate DX
     df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
+    
+    # Calculate ADX
     df['adx'] = wilder_smooth(df['dx'], period)
-    return df.drop(['prev_close', 'tr', 'up_move', 'down_move', '+dm', '-dm', 
-                   'smoothed_tr', 'smoothed_+dm', 'smoothed_-dm', 'dx'], axis=1)
+    
+    # Clean up intermediate columns
+    df.drop([
+        'prev_close', 'tr', 'up_move', 'down_move', 
+        '+dm', '-dm', 'smoothed_tr', 'smoothed_+dm', 
+        'smoothed_-dm', 'dx'
+    ], axis=1, inplace=True)
+    
+    return df
 
 def calculate_ema(df, short, long):
     df['ema_short'] = df['close'].ewm(span=short, adjust=False).mean()
@@ -93,37 +129,13 @@ def calculate_atr(df, period=14):
     df['atr'] = df['tr'].rolling(period).mean()
     return df
 
-def get_ema_signal(df):
-    ema_short_prev2 = df['ema_short'].iloc[-3]
-    ema_long_prev2 = df['ema_long'].iloc[-3]
-    ema_short_prev1 = df['ema_short'].iloc[-2]
-    ema_long_prev1 = df['ema_long'].iloc[-2]
-
-    if ema_short_prev2 < ema_long_prev2 and ema_short_prev1 > ema_long_prev1:
-        return 'buy'
-    elif ema_short_prev2 > ema_long_prev2 and ema_short_prev1 < ema_long_prev1:
-        return 'sell'
-    return None
-
 # ====== POSITION MANAGEMENT ======
-def set_leverage(symbol, leverage):
-    try:
-        exchange.set_leverage(leverage, symbol)
-        print(f"Leverage set to {leverage}x")
-    except ccxt.BaseError as e:
-        if "leverage not modified" not in str(e).lower():
-            print(f"[Leverage Error]: {str(e)}")
-
-def fetch_ohlcv(symbol, timeframe, limit=200):
-    data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
-
 def force_close_all_positions():
+    """Close ALL positions for the symbol"""
     try:
         exchange.cancel_all_orders(symbol)
         positions = exchange.fetch_positions([symbol])
+        
         for pos in positions:
             if float(pos['contracts']) > 0:
                 close_side = 'sell' if pos['side'].lower() == 'long' else 'buy'
@@ -145,11 +157,13 @@ def force_close_all_positions():
                 
         print("❗ Some positions may remain open")
         return False
+        
     except Exception as e:
         print(f"💥 Emergency close failed: {str(e)}")
         return False
 
 def close_position(positionIdx):
+    """Enhanced position closing with verification"""
     for attempt in range(3):
         try:
             positions = exchange.fetch_positions([symbol])
@@ -180,9 +194,11 @@ def close_position(positionIdx):
         except Exception as e:
             print(f"Attempt {attempt + 1} failed: {str(e)}")
             time.sleep(2)
+    
     return force_close_all_positions()
 
 def sync_position_state():
+    """Synchronize internal state with actual positions"""
     global is_long_open, is_short_open
     try:
         positions = exchange.fetch_positions([symbol])
@@ -192,81 +208,53 @@ def sync_position_state():
         print(f"[State Sync Error]: {str(e)}")
 
 # ====== TRADING FUNCTIONS ======
-def update_sl_for_full_position(position_type, new_sl):
+def set_leverage(symbol, leverage):
     try:
-        exchange.cancel_all_orders(symbol)
-        positions = exchange.fetch_positions([symbol])
-        pos = next((p for p in positions if 
-                   p['symbol'] == symbol and 
-                   float(p['contracts']) > 0), None)
-        
-        if not pos:
-            return False
-            
-        exchange.create_order(
-            symbol,
-            'market',
-            position_type,
-            0,
-            None,
-            {
-                'positionIdx': 1 if position_type == 'buy' else 2,
-                'stopLoss': round(new_sl, 4),
-                'slTriggerBy': 'LastPrice'
-            }
-        )
-        print(f"✅ Updated SL to {new_sl:.4f} for full position")
-        return True
-    except Exception as e:
-        print(f"[SL Update Error]: {str(e)}")
-        return False
+        exchange.set_leverage(leverage, symbol)
+        print(f"Leverage set to {leverage}x")
+    except ccxt.BaseError as e:
+        if "leverage not modified" not in str(e).lower():
+            print(f"[Leverage Error]: {str(e)}")
 
-def monitor_and_adjust_sl(position_type, entry_price, initial_sl, rr_1_1_price, tp_prices):
-    sl_levels = {
-        '1_1': entry_price + (entry_price - initial_sl) * 0.5 if position_type == 'buy' else entry_price - (initial_sl - entry_price) * 0.5,
-        '1_2': entry_price,
-        '1_3': entry_price + (entry_price - initial_sl) * 0.5 if position_type == 'buy' else entry_price - (initial_sl - entry_price) * 0.5
-    }
-    
+def fetch_ohlcv(symbol, timeframe, limit=200):
+    data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+
+def get_ema_signal(df):
+    ema_short_prev2 = df['ema_short'].iloc[-3]
+    ema_long_prev2 = df['ema_long'].iloc[-3]
+    ema_short_prev1 = df['ema_short'].iloc[-2]
+    ema_long_prev1 = df['ema_long'].iloc[-2]
+
+    if ema_short_prev2 < ema_long_prev2 and ema_short_prev1 > ema_long_prev1:
+        return 'buy'
+    elif ema_short_prev2 > ema_long_prev2 and ema_short_prev1 < ema_long_prev1:
+        return 'sell'
+    return None
+
+def log_pnl(position_type):
+    """Real-time PNL monitoring"""
+    print(f"\n=== PNL Monitoring ({position_type.upper()}) ===")
     while True:
         try:
             positions = exchange.fetch_positions([symbol])
-            pos = next((p for p in positions if p['symbol'] == symbol and float(p['contracts']) > 0), None)
+            pos = next((p for p in positions if 
+                       p['symbol'] == symbol and 
+                       float(p['contracts']) > 0), None)
+            
             if not pos:
                 break
                 
-            current_price = float(pos['markPrice'])
-            
-            if position_type == 'buy':
-                if current_price >= rr_1_1_price and trade_history[-1]['sl'] != sl_levels['1_1']:
-                    print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
-                    if update_sl_for_full_position(position_type, sl_levels['1_1']):
-                        trade_history[-1]['sl'] = sl_levels['1_1']
-                elif current_price >= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_2']:
-                    print(f"🔥 1:2 RR reached - Moving SL to breakeven")
-                    if update_sl_for_full_position(position_type, sl_levels['1_2']):
-                        trade_history[-1]['sl'] = sl_levels['1_2']
-                elif current_price >= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_3']:
-                    print(f"🔥 1:3 RR reached - Moving SL to {sl_levels['1_3']:.4f}")
-                    if update_sl_for_full_position(position_type, sl_levels['1_3']):
-                        trade_history[-1]['sl'] = sl_levels['1_3']
-            else:
-                if current_price <= rr_1_1_price and trade_history[-1]['sl'] != sl_levels['1_1']:
-                    print(f"🔥 1:1 RR reached - Moving SL to {sl_levels['1_1']:.4f}")
-                    if update_sl_for_full_position(position_type, sl_levels['1_1']):
-                        trade_history[-1]['sl'] = sl_levels['1_1']
-                elif current_price <= tp_prices[0] and trade_history[-1]['sl'] != sl_levels['1_2']:
-                    print(f"🔥 1:2 RR reached - Moving SL to breakeven")
-                    if update_sl_for_full_position(position_type, sl_levels['1_2']):
-                        trade_history[-1]['sl'] = sl_levels['1_2']
-                elif current_price <= tp_prices[1] and trade_history[-1]['sl'] != sl_levels['1_3']:
-                    print(f"🔥 1:3 RR reached - Moving SL to {sl_levels['1_3']:.4f}")
-                    if update_sl_for_full_position(position_type, sl_levels['1_3']):
-                        trade_history[-1]['sl'] = sl_levels['1_3']
-            
+            print(
+                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                f"Unrealized PNL: ${float(pos['unrealizedPnl']):.2f} | "
+                f"Entry: {float(pos['entryPrice']):.4f}"
+            )
             time.sleep(15)
         except Exception as e:
-            print(f"[SL Monitoring Error]: {str(e)}")
+            print(f"[PNL Error]: {str(e)}")
             break
 
 def place_order(signal, df):
@@ -279,6 +267,7 @@ def place_order(signal, df):
     if signal == last_signal:
         return
 
+    # Close opposite position
     if (signal == 'buy' and is_short_open) or (signal == 'sell' and is_long_open):
         position_to_close = 2 if is_short_open else 1
         if not close_position(position_to_close):
@@ -287,23 +276,25 @@ def place_order(signal, df):
         time.sleep(2)
         sync_position_state()
 
+    # Calculate risk parameters
     if signal == 'buy':
         sl_price = recent_candles['low'].min()
         risk = current_price - sl_price
-        rr_1_1_price = current_price + risk
-        tp_prices = [current_price + r * risk for r in [2, 3, 4]]
+        tp_prices = [current_price + r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
     else:
         sl_price = recent_candles['high'].max()
         risk = sl_price - current_price
-        rr_1_1_price = current_price - risk
         tp_prices = [current_price - r * risk for r in [2, 3, 4]]
 
-    quantities = [round(quantity * p, 3) for p in [0.40, 0.30, 0.20]] + [round(quantity * 0.10, 3)]
+    quantities = [
+        round(quantity * p, 3) for p in [0.40, 0.30, 0.20]  # 40%, 30%, 20%
+    ] + [round(quantity * 0.10, 3)]  # 10% runner
 
     try:
         positionIdx = 1 if signal == 'buy' else 2
         close_side = 'sell' if signal == 'buy' else 'buy'
         
+        # Execute orders for all 4 portions
         for i in range(4):
             exchange.create_order(
                 symbol,
@@ -317,7 +308,7 @@ def place_order(signal, df):
                     'slTriggerBy': 'LastPrice'
                 }
             )
-            if i < 3:
+            if i < 3:  # Add TP for first 3 portions
                 exchange.create_order(
                     symbol,
                     'limit',
@@ -330,6 +321,7 @@ def place_order(signal, df):
                     }
                 )
 
+        # Update state and log
         if signal == 'buy':
             is_long_open = True
         else:
@@ -342,7 +334,6 @@ def place_order(signal, df):
             'entry': current_price,
             'size': quantity,
             'sl': sl_price,
-            'rr_1_1': rr_1_1_price,
             'tps': tp_prices,
             'adx': df['adx'].iloc[-1],
             '+di': df['+di'].iloc[-1],
@@ -358,10 +349,7 @@ def place_order(signal, df):
         print(f"  TP3: {tp_prices[2]:.4f} (1:4, {quantities[2]} contracts)")
         print(f"  Runner: {quantities[3]} contracts (No TP)")
         
-        threading.Thread(
-            target=monitor_and_adjust_sl,
-            args=(signal, current_price, sl_price, rr_1_1_price, tp_prices)
-        ).start()
+        threading.Thread(target=log_pnl, args=(signal,)).start()
 
     except Exception as e:
         print(f"[Order Error]: {str(e)}")
@@ -370,6 +358,7 @@ def place_order(signal, df):
 def run_bot():
     print(f"\nRunning bot at {datetime.datetime.now()}")
     try:
+        set_leverage(symbol, leverage)
         df = fetch_ohlcv(symbol, timeframe)
         df = calculate_ema(df, ema_short_period, ema_long_period)
         df = calculate_rsi(df)
@@ -389,14 +378,17 @@ def run_bot():
             print("ANALYSING THE MARKET")
             return
 
+        # ADX Filter
         if enable_adx_filter:
             if current_adx < adx_threshold:
                 print(f"ADX {current_adx:.4f} < threshold {adx_threshold} - Skipping trade")
                 return
+                
             if (signal == 'buy' and plus_di < minus_di) or (signal == 'sell' and minus_di < plus_di):
                 print("Directional momentum weak, skipping trade")
                 return
 
+        # Other filters
         if enable_ema50_filter and (
             (signal == 'buy' and df['close'].iloc[-1] < df['ema_50'].iloc[-1]) or
             (signal == 'sell' and df['close'].iloc[-1] > df['ema_50'].iloc[-1])
@@ -416,30 +408,25 @@ def run_bot():
         print(f"[Bot Error]: {str(e)}")
         force_close_all_positions()
 
-# ====== MAIN EXECUTION ======
+# ====== MAIN LOOP ======
 if __name__ == "__main__":
-    print("=== ALIV MISHRA-AM27 SCALPER ===")
+    print("=== Trend-Following Bot ===")
     print(f"Symbol: {symbol} | TF: {timeframe}")
     print(f"Strategy: EMA{ema_short_period}/{ema_long_period} Crossover")
-    print(f"Risk: 3TPs (1:2,1:3,1:4) with Full Position Trailing SL")
+    print(f"Risk: 3TPs (1:2,1:3,1:4) + 10% Runner")
     print(f"ADX Filter: {'ON' if enable_adx_filter else 'OFF'} (Threshold: {adx_threshold})")
     
-    try:
-        set_leverage(symbol, leverage)
-        sync_position_state()
-        
-        while True:
-            try:
-                run_bot()
-                time.sleep(60)
-            except KeyboardInterrupt:
-                print("\nShutting down gracefully...")
-                force_close_all_positions()
-                break
-            except Exception as e:
-                print(f"💣 Critical error: {str(e)}")
-                force_close_all_positions()
-                time.sleep(60)
-    except Exception as e:
-        print(f"💥 Initialization failed: {str(e)}")
-        force_close_all_positions()
+    sync_position_state()
+    
+    while True:
+        try:
+            run_bot()
+            time.sleep(60)
+        except KeyboardInterrupt:
+            print("\nShutting down gracefully...")
+            force_close_all_positions()
+            break
+        except Exception as e:
+            print(f"💣 Critical error: {str(e)}")
+            force_close_all_positions()
+            time.sleep(60)
