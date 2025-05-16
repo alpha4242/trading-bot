@@ -11,18 +11,14 @@ API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
 symbol = 'PNUTUSDT'
-timeframe = '5m'
+timeframe = '1m'
 ema_short_period = 9
 ema_long_period = 21
-quantity = 35  # Total position size
+quantity = 6  # Position size per trade
 leverage = 10
-stoploss_lookback = 3  # For SL calculation
-rsi_diff_threshold = 8
-enable_ema50_filter = False
-enable_rsi_exit = False
-enable_adx_filter = False  # ADX control switch
-adx_threshold = 20  # Minimum ADX value for valid trend
-adx_period = 14  # ADX calculation period
+enable_adx_filter = False
+adx_threshold = 20
+adx_period = 14
 
 # ====== INIT EXCHANGE ======
 exchange = ccxt.bybit({
@@ -40,75 +36,18 @@ exchange.load_markets()
 is_long_open = False
 is_short_open = False
 last_signal = None
-trade_history = []  # For tracking performance
+trade_history = []
+current_trend = None  # 'bullish' or 'bearish'
+active_trailing_stops = {}
 
 # ====== TECHNICAL INDICATORS ======
-def calculate_adx(df, period=14):
-    """
-    Calculate ADX, +DI, -DI according to Bybit's implementation
-    Returns DataFrame with 'adx', '+di', '-di' columns added
-    """
-    # Calculate True Range
-    df['prev_close'] = df['close'].shift(1)
-    df['tr'] = df[['high', 'low', 'prev_close']].apply(
-        lambda x: max(x['high'] - x['low'], 
-                     abs(x['high'] - x['prev_close']), 
-                     abs(x['low'] - x['prev_close'])),
-        axis=1
-    )
-    
-    # Calculate Directional Movements
-    df['up_move'] = df['high'] - df['high'].shift(1)
-    df['down_move'] = df['low'].shift(1) - df['low']
-    
-    # Calculate +DM and -DM
-    df['+dm'] = np.where(
-        (df['up_move'] > df['down_move']) & (df['up_move'] > 0),
-        df['up_move'],
-        0
-    )
-    df['-dm'] = np.where(
-        (df['down_move'] > df['up_move']) & (df['down_move'] > 0),
-        df['down_move'],
-        0
-    )
-    
-    # Wilder's smoothing (RMA)
-    def wilder_smooth(series, window):
-        return series.ewm(
-            alpha=1.0/window, 
-            min_periods=window, 
-            adjust=False
-        ).mean()
-    
-    # Calculate smoothed TR, +DM, -DM
-    df['smoothed_tr'] = wilder_smooth(df['tr'], period)
-    df['smoothed_+dm'] = wilder_smooth(df['+dm'], period)
-    df['smoothed_-dm'] = wilder_smooth(df['-dm'], period)
-    
-    # Calculate +DI and -DI
-    df['+di'] = 100 * (df['smoothed_+dm'] / df['smoothed_tr'])
-    df['-di'] = 100 * (df['smoothed_-dm'] / df['smoothed_tr'])
-    
-    # Calculate DX
-    df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
-    
-    # Calculate ADX
-    df['adx'] = wilder_smooth(df['dx'], period)
-    
-    # Clean up intermediate columns
-    df.drop([
-        'prev_close', 'tr', 'up_move', 'down_move', 
-        '+dm', '-dm', 'smoothed_tr', 'smoothed_+dm', 
-        'smoothed_-dm', 'dx'
-    ], axis=1, inplace=True)
-    
-    return df
-
-def calculate_ema(df, short, long):
-    df['ema_short'] = df['close'].ewm(span=short, adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=long, adjust=False).mean()
+def calculate_ema(df):
+    df['ema_9'] = df['close'].ewm(span=ema_short_period, adjust=False).mean()
+    df['ema_21'] = df['close'].ewm(span=ema_long_period, adjust=False).mean()
     df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['ema_100'] = df['close'].ewm(span=100, adjust=False).mean()
+    df['ema_150'] = df['close'].ewm(span=150, adjust=False).mean()
+    df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
     return df
 
 def calculate_rsi(df, period=14):
@@ -129,9 +68,50 @@ def calculate_atr(df, period=14):
     df['atr'] = df['tr'].rolling(period).mean()
     return df
 
+def check_ema_stack(df):
+    global current_trend
+    
+    ema_50 = df['ema_50'].iloc[-1]
+    ema_100 = df['ema_100'].iloc[-1]
+    ema_150 = df['ema_150'].iloc[-1]
+    ema_200 = df['ema_200'].iloc[-1]
+    
+    # Check for bearish stack (50 < 100 < 150 < 200)
+    if ema_50 < ema_100 < ema_150 < ema_200:
+        current_trend = 'bearish'
+        return 'bearish'
+    
+    # Check for bullish stack (50 > 100 > 150 > 200)
+    elif ema_50 > ema_100 > ema_150 > ema_200:
+        current_trend = 'bullish'
+        return 'bullish'
+    
+    # Check if trend is broken (50 crosses 100)
+    elif current_trend == 'bearish' and ema_50 > ema_100:
+        current_trend = None
+        return 'trend_broken'
+    elif current_trend == 'bullish' and ema_50 < ema_100:
+        current_trend = None
+        return 'trend_broken'
+    
+    return None
+
+def get_ema_signal(df):
+    ema_short_prev2 = df['ema_9'].iloc[-3]
+    ema_long_prev2 = df['ema_21'].iloc[-3]
+    ema_short_prev1 = df['ema_9'].iloc[-2]
+    ema_long_prev1 = df['ema_21'].iloc[-2]
+    
+    if current_trend == 'bearish':
+        if ema_short_prev2 > ema_long_prev2 and ema_short_prev1 < ema_long_prev1:
+            return 'sell'
+    elif current_trend == 'bullish':
+        if ema_short_prev2 < ema_long_prev2 and ema_short_prev1 > ema_long_prev1:
+            return 'buy'
+    return None
+
 # ====== POSITION MANAGEMENT ======
 def force_close_all_positions():
-    """Close ALL positions for the symbol"""
     try:
         exchange.cancel_all_orders(symbol)
         positions = exchange.fetch_positions([symbol])
@@ -163,7 +143,6 @@ def force_close_all_positions():
         return False
 
 def close_position(positionIdx):
-    """Enhanced position closing with verification"""
     for attempt in range(3):
         try:
             positions = exchange.fetch_positions([symbol])
@@ -198,7 +177,6 @@ def close_position(positionIdx):
     return force_close_all_positions()
 
 def sync_position_state():
-    """Synchronize internal state with actual positions"""
     global is_long_open, is_short_open
     try:
         positions = exchange.fetch_positions([symbol])
@@ -206,6 +184,115 @@ def sync_position_state():
         is_short_open = any(p for p in positions if int(p['info']['positionIdx']) == 2 and float(p['contracts']) > 0)
     except Exception as e:
         print(f"[State Sync Error]: {str(e)}")
+
+def manage_trailing_stop(position_type, entry_price):
+    positionIdx = 1 if position_type == 'long' else 2
+    trade_id = f"{position_type}_{time.time()}"
+    active_trailing_stops[trade_id] = True
+    
+    print(f"\n=== Trailing Stop Active ({position_type.upper()}) ===")
+    
+    while active_trailing_stops.get(trade_id, False):
+        try:
+            positions = exchange.fetch_positions([symbol])
+            pos = next((p for p in positions if 
+                       int(p['info']['positionIdx']) == positionIdx and 
+                       float(p['contracts']) > 0), None)
+            
+            if not pos:
+                print("Position closed - Stopping trailing stop")
+                break
+                
+            df = fetch_ohlcv(symbol, timeframe, limit=200)
+            df = calculate_ema(df)
+            current_200ema = df['ema_200'].iloc[-1]
+            current_price = float(pos['markPrice'])
+            
+            if position_type == 'long':
+                risk = entry_price - current_200ema
+                reward = current_price - entry_price
+                
+                if reward >= risk:  # Only trail after 1:1
+                    new_sl = current_200ema
+                    current_sl = float(pos['stopLoss'] or 0)
+                    
+                    if new_sl > current_sl:
+                        try:
+                            exchange.create_order(
+                                symbol,
+                                'market',
+                                'sell',
+                                0,
+                                None,
+                                {
+                                    'positionIdx': positionIdx,
+                                    'stopLoss': round(new_sl, 4),
+                                    'slTriggerBy': 'LastPrice',
+                                    'reduceOnly': True
+                                }
+                            )
+                            print(f"Updated trailing stop to {new_sl:.4f}")
+                        except Exception as e:
+                            print(f"Trailing stop update failed: {str(e)}")
+            else:  # short
+                risk = current_200ema - entry_price
+                reward = entry_price - current_price
+                
+                if reward >= risk:  # Only trail after 1:1
+                    new_sl = current_200ema
+                    current_sl = float(pos['stopLoss'] or float('inf'))
+                    
+                    if new_sl < current_sl:
+                        try:
+                            exchange.create_order(
+                                symbol,
+                                'market',
+                                'buy',
+                                0,
+                                None,
+                                {
+                                    'positionIdx': positionIdx,
+                                    'stopLoss': round(new_sl, 4),
+                                    'slTriggerBy': 'LastPrice',
+                                    'reduceOnly': True
+                                }
+                            )
+                            print(f"Updated trailing stop to {new_sl:.4f}")
+                        except Exception as e:
+                            print(f"Trailing stop update failed: {str(e)}")
+            
+            time.sleep(15)
+            
+        except Exception as e:
+            print(f"[Trailing Stop Error]: {str(e)}")
+            time.sleep(30)
+    
+    active_trailing_stops.pop(trade_id, None)
+
+def log_pnl(position_type):
+    print(f"\n=== PNL Monitoring ({position_type.upper()}) ===")
+    positionIdx = 1 if position_type == 'long' else 2
+    
+    while True:
+        try:
+            positions = exchange.fetch_positions([symbol])
+            pos = next((p for p in positions if 
+                       int(p['info']['positionIdx']) == positionIdx and 
+                       float(p['contracts']) > 0), None)
+            
+            if not pos:
+                break
+                
+            print(
+                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                f"Unrealized PNL: ${float(pos['unrealizedPnl']):.2f} | "
+                f"Entry: {float(pos['entryPrice']):.4f} | "
+                f"SL: {float(pos['stopLoss'] or 0):.4f}"
+            )
+            time.sleep(15)
+        except Exception as e:
+            print(f"[PNL Error]: {str(e)}")
+            break
 
 # ====== TRADING FUNCTIONS ======
 def set_leverage(symbol, leverage):
@@ -222,69 +309,13 @@ def fetch_ohlcv(symbol, timeframe, limit=200):
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
 
-def get_ema_signal(df):
-    ema_short_prev2 = df['ema_short'].iloc[-3]
-    ema_long_prev2 = df['ema_long'].iloc[-3]
-    ema_short_prev1 = df['ema_short'].iloc[-2]
-    ema_long_prev1 = df['ema_long'].iloc[-2]
-
-    if ema_short_prev2 < ema_long_prev2 and ema_short_prev1 > ema_long_prev1:
-        return 'buy'
-    elif ema_short_prev2 > ema_long_prev2 and ema_short_prev1 < ema_long_prev1:
-        return 'sell'
-    return None
-
-def log_pnl(position_type):
-    """Real-time PNL monitoring"""
-    print(f"\n=== PNL Monitoring ({position_type.upper()}) ===")
-    while True:
-        try:
-            positions = exchange.fetch_positions([symbol])
-            pos = next((p for p in positions if 
-                       p['symbol'] == symbol and 
-                       float(p['contracts']) > 0), None)
-            
-            if not pos:
-                break
-                
-            print(
-                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-                f"Unrealized PNL: ${float(pos['unrealizedPnl']):.2f} | "
-                f"Entry: {float(pos['entryPrice']):.4f}"
-            )
-            time.sleep(15)
-        except Exception as e:
-            print(f"[PNL Error]: {str(e)}")
-            break
-
 def place_order(signal, df):
     global is_long_open, is_short_open, last_signal, trade_history
     
     sync_position_state()
-    recent_candles = df[-stoploss_lookback:]
     current_price = df['close'].iloc[-1]
-
-    if signal == last_signal:
-        return
-
-    # EMA50 Filter: Handle opposite signals while still above/below EMA50
-    if enable_ema50_filter:
-        # If long is open and we get a sell signal while above EMA50
-        if is_long_open and signal == 'sell' and current_price > df['ema_50'].iloc[-1]:
-            print("EMA50 Filter: Opposite signal received while above 50 EMA - Closing long position only")
-            if close_position(1):  # Close long position (positionIdx=1)
-                is_long_open = False
-                last_signal = None
-            return
-        # If short is open and we get a buy signal while below EMA50
-        elif is_short_open and signal == 'buy' and current_price < df['ema_50'].iloc[-1]:
-            print("EMA50 Filter: Opposite signal received while below 50 EMA - Closing short position only")
-            if close_position(2):  # Close short position (positionIdx=2)
-                is_short_open = False
-                last_signal = None
-            return
-
-    # Original position closing logic for non-filtered cases
+    
+    # Only close opposite positions
     if (signal == 'buy' and is_short_open) or (signal == 'sell' and is_long_open):
         position_to_close = 2 if is_short_open else 1
         if not close_position(position_to_close):
@@ -293,50 +324,49 @@ def place_order(signal, df):
         time.sleep(2)
         sync_position_state()
 
+    # Set initial stoploss at 200 EMA
+    sl_price = df['ema_200'].iloc[-1]
+    
     # Calculate risk parameters
     if signal == 'buy':
-        sl_price = recent_candles['low'].min()
         risk = current_price - sl_price
-        tp_prices = [current_price + r * risk for r in [2, 3, 4]]  # 1:2, 1:3, 1:4
+        tp_prices = [current_price + r * risk for r in [1, 2, 3]]  # 1:1, 1:2, 1:3
     else:
-        sl_price = recent_candles['high'].max()
         risk = sl_price - current_price
-        tp_prices = [current_price - r * risk for r in [2, 3, 4]]
-
-    quantities = [
-        round(quantity * p, 3) for p in [0.40, 0.30, 0.20]  # 40%, 30%, 20%
-    ] + [round(quantity * 0.10, 3)]  # 10% runner
+        tp_prices = [current_price - r * risk for r in [1, 2, 3]]
 
     try:
         positionIdx = 1 if signal == 'buy' else 2
         close_side = 'sell' if signal == 'buy' else 'buy'
         
-        # Execute orders for all 4 portions
-        for i in range(4):
+        # Execute market order
+        exchange.create_order(
+            symbol,
+            'market',
+            signal,
+            quantity,
+            None,
+            {
+                'positionIdx': positionIdx,
+                'stopLoss': round(sl_price, 4),
+                'slTriggerBy': 'LastPrice'
+            }
+        )
+        
+        # Set take profits (split quantity equally)
+        tp_qty = round(quantity / len(tp_prices), 3)
+        for i, tp_price in enumerate(tp_prices):
             exchange.create_order(
                 symbol,
-                'market',
-                signal,
-                quantities[i],
-                None,
+                'limit',
+                close_side,
+                tp_qty,
+                round(tp_price, 4),
                 {
                     'positionIdx': positionIdx,
-                    'stopLoss': round(sl_price, 4),
-                    'slTriggerBy': 'LastPrice'
+                    'reduceOnly': True
                 }
             )
-            if i < 3:  # Add TP for first 3 portions
-                exchange.create_order(
-                    symbol,
-                    'limit',
-                    close_side,
-                    quantities[i],
-                    round(tp_prices[i], 4),
-                    {
-                        'positionIdx': positionIdx,
-                        'reduceOnly': True
-                    }
-                )
 
         # Update state and log
         if signal == 'buy':
@@ -352,20 +382,17 @@ def place_order(signal, df):
             'size': quantity,
             'sl': sl_price,
             'tps': tp_prices,
-            'adx': df['adx'].iloc[-1],
-            '+di': df['+di'].iloc[-1],
-            '-di': df['-di'].iloc[-1]
+            'trend': current_trend
         })
         
-        print(f"\n✅ Executed {signal.upper()} Order")
-        print(f"Entry: {current_price:.4f} | SL: {sl_price:.4f}")
-        print(f"ADX: {df['adx'].iloc[-1]:.4f} (+DI: {df['+di'].iloc[-1]:.4f}, -DI: {df['-di'].iloc[-1]:.4f})")
+        print(f"\n✅ Executed {signal.upper()} Order (Trend: {current_trend})")
+        print(f"Entry: {current_price:.4f} | SL (200EMA): {sl_price:.4f}")
         print("Take Profits:")
-        print(f"  TP1: {tp_prices[0]:.4f} (1:2, {quantities[0]} contracts)")
-        print(f"  TP2: {tp_prices[1]:.4f} (1:3, {quantities[1]} contracts)")
-        print(f"  TP3: {tp_prices[2]:.4f} (1:4, {quantities[2]} contracts)")
-        print(f"  Runner: {quantities[3]} contracts (No TP)")
+        for i, tp in enumerate(tp_prices):
+            print(f"  TP{i+1}: {tp:.4f} (1:{i+1})")
         
+        # Start monitoring threads
+        threading.Thread(target=manage_trailing_stop, args=(signal, current_price)).start()
         threading.Thread(target=log_pnl, args=(signal,)).start()
 
     except Exception as e:
@@ -377,47 +404,40 @@ def run_bot():
     try:
         set_leverage(symbol, leverage)
         df = fetch_ohlcv(symbol, timeframe)
-        df = calculate_ema(df, ema_short_period, ema_long_period)
+        df = calculate_ema(df)
         df = calculate_rsi(df)
         df = calculate_atr(df)
-        df = calculate_adx(df, adx_period)
-
-        current_adx = df['adx'].iloc[-1]
-        plus_di = df['+di'].iloc[-1]
-        minus_di = df['-di'].iloc[-1]
         
-        print(f"\nCurrent ADX: {current_adx:.4f}")
-        print(f"+DI: {plus_di:.4f} | -DI: {minus_di:.4f}")
-        print(f"Trend Strength: {'Strong' if current_adx >= adx_threshold else 'Weak'}")
+        # Check EMA stack for trend
+        trend_status = check_ema_stack(df)
+        
+        if trend_status == 'trend_broken':
+            print("❗ Trend broken (50EMA crossed 100EMA) - Closing all positions")
+            force_close_all_positions()
+            return
+        
+        if not current_trend:
+            print("No clear trend (EMAs not stacked properly)")
+            return
+            
+        print(f"\nCurrent Trend: {current_trend.upper()}")
+        print(f"50EMA: {df['ema_50'].iloc[-1]:.4f}")
+        print(f"100EMA: {df['ema_100'].iloc[-1]:.4f}")
+        print(f"150EMA: {df['ema_150'].iloc[-1]:.4f}")
+        print(f"200EMA: {df['ema_200'].iloc[-1]:.4f}")
 
         signal = get_ema_signal(df)
         if not signal:
-            print("ANALYSING THE MARKET")
+            print("No valid signal - Waiting")
             return
-
-        # ADX Filter
-        if enable_adx_filter:
-            if current_adx < adx_threshold:
-                print(f"ADX {current_adx:.4f} < threshold {adx_threshold} - Skipping trade")
-                return
-                
-            if (signal == 'buy' and plus_di < minus_di) or (signal == 'sell' and minus_di < plus_di):
-                print("Directional momentum weak, skipping trade")
-                return
-
-        # EMA50 Filter
-        if enable_ema50_filter:
-            if (signal == 'buy' and df['close'].iloc[-1] < df['ema_50'].iloc[-1]) or \
-               (signal == 'sell' and df['close'].iloc[-1] > df['ema_50'].iloc[-1]):
-                print("EMA50 filter triggered - Not taking trade")
-                return
-
+            
+        # Additional filters
         avg_price = df['close'].iloc[-14:].mean()
         if df['atr'].iloc[-1] < avg_price * 0.001:
-            print("Low volatility (ATR filter)")
+            print("Low volatility (ATR filter) - Skipping trade")
             return
 
-        print(f"Confirmed {signal.upper()} signal with ADX {current_adx:.4f}")
+        print(f"Confirmed {signal.upper()} signal in {current_trend} trend")
         place_order(signal, df)
 
     except Exception as e:
@@ -426,12 +446,10 @@ def run_bot():
 
 # ====== MAIN LOOP ======
 if __name__ == "__main__":
-    print("=== Trend-Following Bot ===")
+    print("=== EMA Stack Trend-Following Bot ===")
     print(f"Symbol: {symbol} | TF: {timeframe}")
-    print(f"Strategy: EMA{ema_short_period}/{ema_long_period} Crossover")
-    print(f"Risk: 3TPs (1:2,1:3,1:4) + 10% Runner")
-    print(f"ADX Filter: {'ON' if enable_adx_filter else 'OFF'} (Threshold: {adx_threshold})")
-    print(f"EMA50 Filter: {'ON' if enable_ema50_filter else 'OFF'}")
+    print(f"Strategy: EMA9/21 Cross in EMA50/100/150/200 Trend")
+    print(f"Risk: 3TPs (1:1,1:2,1:3) + Trailing 200EMA after 1:1")
     
     sync_position_state()
     
@@ -441,6 +459,9 @@ if __name__ == "__main__":
             time.sleep(60)
         except KeyboardInterrupt:
             print("\nShutting down gracefully...")
+            # Stop all trailing threads
+            for trade_id in list(active_trailing_stops.keys()):
+                active_trailing_stops[trade_id] = False
             force_close_all_positions()
             break
         except Exception as e:
