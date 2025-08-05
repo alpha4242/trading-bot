@@ -1,19 +1,23 @@
-import ccxt
-import pandas as pd
-import numpy as np
+import os
 import time
 import datetime
+import hmac
+import hashlib
 import threading
-import os
+import requests
+import pandas as pd
+import numpy as np
+from dotenv import load_dotenv
 
 # ====== CONFIGURATION ======
+load_dotenv()
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
 BASE_URL = "https://api.bybit.com"
 SYMBOL = "SOLUSDT"
-INTERVAL = "1"  # 15min candles
-QUANTITY = 0.1  # Adjust to your desired position size
+INTERVAL = "1"  # 15-minute candles
+QUANTITY = 0.1
 LEVERAGE = 100
 
 # === BYBIT API HELPER ===
@@ -21,31 +25,42 @@ def send_signed_request(http_method, endpoint, params=None):
     if params is None:
         params = {}
     timestamp = str(int(time.time() * 1000))
-    params['api_key'] = API_KEY
+    params['apiKey'] = API_KEY
     params['timestamp'] = timestamp
-    params['recv_window'] = 5000
+    params['recvWindow'] = 5000
 
     sorted_params = dict(sorted(params.items()))
     query_string = "&".join([f"{key}={value}" for key, value in sorted_params.items()])
     signature = hmac.new(bytes(API_SECRET, "utf-8"), bytes(query_string, "utf-8"), hashlib.sha256).hexdigest()
     sorted_params["sign"] = signature
 
-    if http_method == "GET":
-        return requests.get(BASE_URL + endpoint, params=sorted_params).json()
-    else:
-        return requests.post(BASE_URL + endpoint, data=sorted_params).json()
+    url = BASE_URL + endpoint
+    try:
+        if http_method == "GET":
+            response = requests.get(url, params=sorted_params)
+        else:
+            response = requests.post(url, data=sorted_params)
+        return response.json()
+    except Exception as e:
+        print("API Error:", e)
+        return {}
 
 # === FETCH OHLCV DATA ===
 def get_klines(symbol, interval="15", limit=200):
     url = f"{BASE_URL}/v5/market/kline"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    res = requests.get(url, params=params).json()
-    df = pd.DataFrame(res['result']['list'])
-    df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
-    df = df.astype(float)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    return df
+    try:
+        res = requests.get(url, params=params).json()
+        df = pd.DataFrame(res['result']['list'])
+        df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
+        df = df.astype({'open': float, 'high': float, 'low': float, 'close': float,
+                        'volume': float, 'turnover': float})
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+        df.set_index('timestamp', inplace=True)
+        return df
+    except Exception as e:
+        print("Kline fetch error:", e)
+        return pd.DataFrame()
 
 # === HEIKIN ASHI CALCULATION ===
 def heikin_ashi(df):
@@ -97,19 +112,30 @@ def run_bot():
     while True:
         try:
             df = get_klines(SYMBOL, INTERVAL)
+            if df.empty:
+                print("No data retrieved.")
+                time.sleep(60)
+                continue
+
             signal, sl, entry = check_signal(df)
 
             if signal and not in_position:
                 risk = abs(entry - sl)
                 tp = entry + (5 * risk) if signal == "long" else entry - (5 * risk)
-                place_order(signal, QUANTITY, sl, tp)
+                response = place_order(signal, QUANTITY, sl, tp)
+                print("Order Response:", response)
                 in_position = True
             else:
-                print("No signal or already in trade")
+                print("No signal or already in trade.")
+
+            # Auto-reset for demo; in production track actual position via API
+            in_position = False
 
             time.sleep(60 * 15)  # Wait for next candle
         except Exception as e:
-            print("Error:", e)
+            print("Runtime Error:", e)
             time.sleep(60)
 
-run_bot()
+# === START BOT ===
+if __name__ == "__main__":
+    run_bot()
