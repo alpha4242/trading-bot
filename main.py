@@ -16,7 +16,7 @@ API_SECRET = os.getenv("BYBIT_API_SECRET")
 
 BASE_URL = "https://api.bybit.com"
 SYMBOL = "SOLUSDT"
-INTERVAL = "1"  # 15-minute candles
+INTERVAL = "1m"  # 15-minute candles
 QUANTITY = 0.1
 LEVERAGE = 100
 
@@ -65,9 +65,11 @@ def get_klines(symbol, interval="15", limit=200):
 # === HEIKIN ASHI CALCULATION ===
 def heikin_ashi(df):
     df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-    ha_open = [(df['open'][0] + df['close'][0]) / 2]
+    ha_open = [(df['open'].iloc[0] + df['close'].iloc[0]) / 2]
+
     for i in range(1, len(df)):
-        ha_open.append((ha_open[i-1] + df['ha_close'][i-1]) / 2)
+        ha_open.append((ha_open[i-1] + df['ha_close'].iloc[i-1]) / 2)
+
     df['ha_open'] = ha_open
     df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
     df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
@@ -139,4 +141,5 @@ def run_bot():
 # === START BOT ===
 if __name__ == "__main__":
     run_bot()
+
 
