@@ -55,7 +55,7 @@ def get_klines(symbol, interval="15", limit=200):
         df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
         df = df.astype({'open': float, 'high': float, 'low': float, 'close': float,
                         'volume': float, 'turnover': float})
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(np.int64), unit='ms')
         df.set_index('timestamp', inplace=True)
         return df
     except Exception as e:
@@ -139,3 +139,4 @@ def run_bot():
 # === START BOT ===
 if __name__ == "__main__":
     run_bot()
+
