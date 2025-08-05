@@ -1,3 +1,5 @@
 ccxt
 pandas
 ta
+python-dotenv
+
